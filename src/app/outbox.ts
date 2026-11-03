@@ -1,47 +1,77 @@
-/** Reliable outbound message delivery backed by persistent receipts and retried reply effects. */
+/** Reliable outbound message delivery backed by persistent receipts, an effect ledger and retried reply effects. */
 import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
+import type { EffectLedger } from './ledger.ts'
 import type { Store } from './store.ts'
+
+/** The ledger key of a message's reply: the message ID already identifies it across retries. */
+export const replyEffect = (id: string): string => `reply:${id}`
 
 export interface OutboxHost {
   readonly store: Pick<Store, 'atomic' | 'receipts' | 'fencedOut'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
+  readonly ledger: Pick<EffectLedger, 'intent' | 'sent' | 'failed' | 'get'>
+  readonly instanceId: string
+  /** The instance lease epoch the effect runs under. */
+  epoch(): number
   paused(): boolean
 }
 
 /**
  * Persists outbound channel messages as receipts and delivers them sequentially through `Effects` and `SourceRegistry`.
  * Implements the core `Outbox` port for `Engine` and source contexts, ensuring per-conversation ordering for each ticket until an earlier message fails repeatedly.
+ * Each message also gets an effect-ledger row: `intent` with its receipt, and `sent` once the platform accepted it, so a
+ * retry settles a message the platform already accepted without sending it again.
  * Messages wait while processing is paused or their source is unavailable, and settle as dropped when the target conversation is ignored or gone.
  */
 export class Outbox implements OutboxPort {
   constructor(private readonly host: OutboxHost) {
     host.effects.handle('reply', (_payload, id) => this.deliver(id), { limit: () => host.paused() ? 0 : 1, retry: [5000, 300_000] })
   }
-  /** Record a message receipt and enqueue its delivery effect atomically; duplicate message IDs are ignored. */
+  /** Record a message receipt, its ledger intent and its delivery effect atomically; duplicate message IDs are ignored. */
   send(message: OutboundMessage): void {
     // Validate IM reply length here; acknowledgements are already validated when decided.
     if (message.kind === 'reply' && message.channel.source === 'feishu') checkedImText(message.text)
     const { store, effects } = this.host
-    store.atomic(() => { if (store.receipts.add(message)) effects.enqueue('reply', message.id, {}) })
+    store.atomic(() => {
+      if (!store.receipts.add(message)) return
+      this.record(message)
+      effects.enqueue('reply', message.id, {})
+    })
   }
   status(id: string): ReplyStatus | undefined { return this.host.store.receipts.get(id)?.status }
   withdraw(id: string): void {
-    const { store, effects } = this.host
-    store.atomic(() => { if (store.receipts.withdraw(id)) effects.cancel('reply', id) })
+    const { store, effects, ledger } = this.host
+    store.atomic(() => {
+      if (!store.receipts.withdraw(id)) return
+      // A withdrawn message will never be sent; the ledger says so rather than leaving an open intent.
+      ledger.failed(replyEffect(id), { reason: 'withdrawn' })
+      effects.cancel('reply', id)
+    })
   }
   sent(): Promise<void> { return this.host.effects.idle('reply') }
+  /** Records the effect's intent, keeping any record a retry already has. */
+  private record(message: OutboundMessage): void {
+    this.host.ledger.intent(replyEffect(message.id), { instanceId: this.host.instanceId, kind: 'reply',
+      target: `${message.channel.source}:${message.channel.thread}`, leaseEpoch: this.host.epoch() })
+  }
   private async deliver(id: string): Promise<void> {
-    const { store, sources, commands } = this.host
+    const { store, sources, commands, ledger } = this.host
     const receipt = store.receipts.get(id)
     if (receipt?.status !== 'pending') return
     // A fenced replica sends nothing: the receipt stays pending for the replica that takes over.
     if (store.fencedOut) throw new Later('The instance lease was lost; this replica no longer writes')
+    const key = replyEffect(id)
+    const recorded = ledger.get(key)
+    // A crash after the platform accepted the message but before the receipt settled leaves `sent`: settle without sending.
+    if (recorded?.state === 'sent') { store.receipts.settle(receipt, 'sent'); return }
+    // A receipt recorded before the ledger existed, or by an older version, gets its intent now.
+    if (!recorded) this.record(receipt)
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
@@ -49,6 +79,14 @@ export class Outbox implements OutboxPort {
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const result = await sources.send(receipt, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')
-    store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
+    if (result === 'gone') {
+      ledger.failed(key, { reason: 'channelGone' })
+      store.receipts.settle(receipt, 'channelGone')
+      return
+    }
+    // The platform send is idempotent by its own key (the GitHub marker or the Feishu idempotency key), which is the
+    // reconciliation a retry relies on until the delivery plane reports the platform's own message ID.
+    ledger.sent(key, { by: 'platform-idempotency' })
+    store.receipts.settle(receipt, 'sent')
   }
 }

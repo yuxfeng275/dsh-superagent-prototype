@@ -38,7 +38,7 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 | --- | --- | --- |
 | Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
-| Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
+| Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt, its effect-ledger intent and its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`, then records `sent`; a message waits while its Source is off, is settled without sending when the ledger already says `sent`, and is dropped when the conversation is gone or not listened to |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
 
 ### Engine
@@ -160,7 +160,7 @@ Its interfaces are grouped by purpose:
 - **Fencing:** `fence` stops transactional writes once the instance lease is lost, and `fencedOut` reports it; reads continue so the panel and diagnostics still work.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup, and schemas 12 and 13 add the event log, acknowledgement and lease tables without a data migration.
+`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup, and schemas 12 to 14 add the event log, acknowledgement, lease and effect-ledger tables without a data migration.
 
 ### Events
 
@@ -330,7 +330,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/events.ts` | `EventLog`: recording each Trigger before intake, its per-Thread sequence, the local acknowledgement, and the unacknowledged events a start replays |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape; schemas 12 and 13 add tables only |
+| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape; schemas 12 to 14 add tables only |
+| `src/app/ledger.ts` | `EffectLedger`: each controlled external effect by idempotency key, from `intent` to `sent` or `failed`, with the platform idempotency a retry relies on |
 | `src/app/leases.ts` | `Leases`: the lease of a resource, its holder and epoch, the epoch floor, renewal and release |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
@@ -450,6 +451,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/instance-identity.spec.ts` | The instance and replica identities a running Runtime derives, and the main Session name it keeps |
 | `tests/event-log.spec.ts` | The event log: one row per Source event, its per-Thread sequence, acknowledgement, and the replay of an event a crash left unacknowledged |
 | `tests/leases.spec.ts` | Leases: one live holder, a monotonic epoch floor, renewal deadlines, the Runtime's instance lease and its takeover of a stale one |
+| `tests/ledger.spec.ts` | The effect ledger: one record per idempotency key, its intent kept on a retry, and its sent or failed outcome |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
@@ -470,6 +472,7 @@ One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
 | `trigger` | Each Trigger, its time `at` in the one form `Date#toISOString` gives, set when the Engine receives it, so times compare as text | Engine |
 | `event_log` | Each Source event as the runtime received it, with its Source, the deduplication key, the Thread it names, its `thread_seq` and when it was recorded; the same Source event is one row | EventLog, before intake |
 | `inbox_ack` | The events whose Trigger the Engine stored, and when: an event here is handled and is not replayed | EventLog, in the Engine's transaction |
+| `effect_ledger` | Each controlled external effect by idempotency key: its instance, kind, target, lease epoch, state (`intent`, `sent`, `confirmed`, `failed` or `reconciled`), external id when the platform reported one, and detail | Outbox, for replies; the delivery plane later |
 | `lease` | The current lease of each resource: its holder, epoch, state and deadline | Leases |
 | `lease_generation` | The highest epoch ever allocated for each resource, only raised, so an epoch is never reused | Leases |
 | `disposition` | Where each Trigger went: `filtered` with the Source's reason code, its Eval and Decision, the Tickets it reached, by fan-out or attachment, whether it was requeued, the Tickets that handed it back with their reasons, and those whose Executor acknowledged or answered it | Engine |
@@ -499,9 +502,9 @@ Dismissal is stored on its Decision. Input text is rendered from the Ticket when
 
 Read caches use bounded in-memory `TextCache` instances and are lost on restart. A Session paging through an original Source record or prompt preview must reread offset 0 after a restart. Feishu links resolved after intake are cached the same way; link-based search finds them only after that link has been read during the current process lifetime.
 
-Nothing deletes old records yet, so these grow without bound: the `trigger`, `event_log`, `inbox_ack`, `disposition` and `decision` rows; the `lease` and `lease_generation` rows, whose floor must outlive any one lease; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
+Nothing deletes old records yet, so these grow without bound: the `trigger`, `event_log`, `inbox_ack`, `disposition` and `decision` rows; the `lease` and `lease_generation` rows, whose floor must outlive any one lease; the `effect_ledger` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one. Schemas 12 and 13 add the event log, acknowledgement and lease tables when any supported database opens, without rewriting stored records.
+`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one. Schemas 12 to 14 add the event log, acknowledgement, lease and effect-ledger tables when any supported database opens, without rewriting stored records.
 
 ## Model-facing interfaces
 
