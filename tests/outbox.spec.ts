@@ -1,8 +1,13 @@
-/** Outbox delivery when processing is paused or a Source kind registers late. */
+/** Outbox delivery when processing is paused, a Source kind registers late, or the instance is fenced. */
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { OutboundMessage } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
+import { Outbox } from '../src/app/outbox.ts'
+import { Store } from '../src/app/store.ts'
 import type { SourceKind } from '../src/sources/kind.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -39,4 +44,23 @@ it('keeps a message for a Source that is not installed waiting, and sends it onc
   // A message whose Source was not installed is tried again after 5 seconds.
   await at(5000)
   expect([h.runtime.outbox.status('waiting'), sent.map(message => message.id)]).toEqual(['sent', ['waiting']])
+})
+
+it('sends nothing once the instance is fenced, leaving the receipt pending for the next replica', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'outbox-fenced-'))
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    const handlers = new Map<string, (payload: unknown, key: string) => Promise<void>>()
+    const effects = { handle: (kind: string, run: (payload: unknown, key: string) => Promise<void>) => { handlers.set(kind, run) },
+      enqueue: vi.fn(), cancel: vi.fn(), idle: vi.fn(async () => {}) }
+    const sent: OutboundMessage[] = []
+    const sources = { instance: () => ({ enabled: true }), channelAllowed: () => true,
+      send: vi.fn(async (message: OutboundMessage) => { sent.push(message); return 'sent' as const }) }
+    const outbox = new Outbox({ store, effects, sources, commands: {} as Commands, paused: () => false } as never)
+    const message: OutboundMessage = { id: 'fenced', channel: { source: 'github', thread: 'github:8', address: { number: '8' } }, text: 'Done', kind: 'notice' }
+    outbox.send(message)
+    store.fence()
+    await expect(handlers.get('reply')!({}, 'fenced')).rejects.toThrow('The instance lease was lost')
+    expect([sent.length, store.receipts.get('fenced')?.status]).toEqual([0, 'pending'])
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }) }
 })

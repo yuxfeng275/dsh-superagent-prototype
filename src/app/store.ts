@@ -142,13 +142,23 @@ export class Store implements Repositories {
     for (const ref of trigger.threads) insert.run(threadKey(ref), trigger.id, trigger.at, trigger.human ? 1 : 0)
   }
   private depth = 0
+  /** Set once the instance lease is lost: this replica must not write domain state another replica may own. */
+  private fenced = false
   /** Callbacks queued to run once the outermost transaction commits, indexed by savepoint level; rolling back a level discards its callbacks. */
   private readonly committed: (() => void)[][] = []
+  /**
+   * Stops transactional writes after the instance lease was lost; reads continue so the panel and diagnostics still work.
+   * The runtime's self-fence calls this before it stops, closing the window in which an effect already under way could write.
+   */
+  fence(): void { this.fenced = true }
+  /** Whether this replica has been fenced from writing. */
+  get fencedOut(): boolean { return this.fenced }
   /**
    * Executes `operation` in a savepoint transaction (nested inside the current transaction if any); a failure rolls back its changes.
    * Post-commit callbacks run only after the outermost transaction commits, and callback errors are reported without failing the committed transaction.
    */
   atomic<T>(operation: () => T): T {
+    if (this.fenced) throw new Error('The instance lease was lost; this replica no longer writes')
     const level = this.depth++
     const name = `orchestrator_atomic_${level}`
     this.committed[level] = []

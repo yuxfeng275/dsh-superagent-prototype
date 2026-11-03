@@ -282,8 +282,9 @@ export class Runtime extends Service implements SourceHost {
       if (performance.now() >= this.fenceAt) this.fence()
     }, INSTANCE_LEASE_HEARTBEAT_MS)
   }
-  /** Stops this replica because another may hold the instance lease now. */
+  /** Stops this replica because another may hold the instance lease now, rejecting writes before stopping. */
   private fence(): void {
+    this.store.fence()
     this.runtimeHealth.set({ state: 'error', detail: 'The instance lease was lost; this replica stops', at: now() })
     void this.stop()
   }
