@@ -159,7 +159,11 @@ Its interfaces are grouped by purpose:
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup.
+`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup, and schema 12 adds the event log and acknowledgement tables without a data migration.
+
+### Events
+
+`EventLog` (`src/app/events.ts`) records every Trigger before the Engine handles it and acknowledges the record inside the Engine's own transaction, which stores the Trigger. A crash between the two leaves the event unacknowledged, and the next start replays it; replay is safe because the Engine ignores a Trigger it already stored. Each event also gets a `thread_seq`, the per-Thread position the control plane will later use as a cursor.
 
 ### Effects
 
@@ -319,8 +323,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
+| `src/app/events.ts` | `EventLog`: recording each Trigger before intake, its per-Thread sequence, the local acknowledgement, and the unacknowledged events a start replays |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape; schema 12 adds tables only |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -437,6 +442,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/instance-identity.spec.ts` | The instance and replica identities a running Runtime derives, and the main Session name it keeps |
+| `tests/event-log.spec.ts` | The event log: one row per Source event, its per-Thread sequence, acknowledgement, and the replay of an event a crash left unacknowledged |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
@@ -455,6 +461,8 @@ One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
 | Table | Holds | Written by |
 | --- | --- | --- |
 | `trigger` | Each Trigger, its time `at` in the one form `Date#toISOString` gives, set when the Engine receives it, so times compare as text | Engine |
+| `event_log` | Each Source event as the runtime received it, with its Source, the deduplication key, the Thread it names, its `thread_seq` and when it was recorded; the same Source event is one row | EventLog, before intake |
+| `inbox_ack` | The events whose Trigger the Engine stored, and when: an event here is handled and is not replayed | EventLog, in the Engine's transaction |
 | `disposition` | Where each Trigger went: `filtered` with the Source's reason code, its Eval and Decision, the Tickets it reached, by fan-out or attachment, whether it was requeued, the Tickets that handed it back with their reasons, and those whose Executor acknowledged or answered it | Engine |
 | `trigger_thread` | Which Threads each Trigger is on, with its time and whether a person wrote it, so a Thread's Triggers are read without scanning every Trigger, in order of time and then id: a page of a Thread's timeline continues from a `<at>|<id>` cursor, and Triggers that share a time are not skipped | Store, with each Trigger |
 | `thread` | Threads: Subscriptions, the Tickets that follow it for context, queued Triggers, the Eval in progress, the count of its expiries and `meta`; the generated columns `active`, set while Triggers are queued or an Eval runs, and `subscribed`, its Source while a Ticket subscribes to it | Engine; Sources write `meta` |
@@ -482,9 +490,9 @@ Dismissal is stored on its Decision. Input text is rendered from the Ticket when
 
 Read caches use bounded in-memory `TextCache` instances and are lost on restart. A Session paging through an original Source record or prompt preview must reread offset 0 after a restart. Feishu links resolved after intake are cached the same way; link-based search finds them only after that link has been read during the current process lifetime.
 
-Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
+Nothing deletes old records yet, so these grow without bound: the `trigger`, `event_log`, `inbox_ack`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
+`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one. Schema 12 adds the event log and acknowledgement tables when any supported database opens, without rewriting stored records.
 
 ## Model-facing interfaces
 

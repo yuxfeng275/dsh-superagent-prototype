@@ -1,6 +1,7 @@
 /** Pass scheduling, coalescing, and runtime health reporting. */
 import { expect, it, vi } from 'vitest'
 import { Passes } from '../src/app/passes.ts'
+import type { Store } from '../src/app/store.ts'
 import type { Trigger } from '../src/core/index.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 
@@ -8,8 +9,10 @@ function passes(closing = () => false) {
   const health = new HealthBoard().claim('runtime', { state: 'starting', detail: '' })
   const engine = { receive: vi.fn(() => 'stored' as const), evaluateDue: vi.fn() }
   const effects = { kick: vi.fn(), idle: vi.fn(async () => {}) }
-  const value = new Passes({ engine, effects, health, lifetime: new AbortController().signal, configured: () => true, closing })
-  return { passes: value, engine, effects, health }
+  const atomic = vi.fn(<T>(work: () => T): T => work())
+  const store = { atomic } as unknown as Pick<Store, 'atomic'>
+  const value = new Passes({ engine, effects, store, health, lifetime: new AbortController().signal, configured: () => true, closing })
+  return { passes: value, engine, effects, store, health }
 }
 const trigger = { id: 't1', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_1:om_1' }], actor: { source: 'feishu', id: 'ou_a' }, human: true,
   at: '2026-10-01T00:00:00.000Z', text: 'hi', meta: {} } as Trigger
@@ -39,7 +42,11 @@ it('refuses a Trigger while dsh-superagent stops, before the Engine stores anyth
   expect(() => h.passes.receive(trigger)).toThrow('Orchestrator is stopping')
   expect(h.engine.receive).not.toHaveBeenCalled()
   closing = false
-  expect(h.passes.receive(trigger)).toBe('stored')
+  const acknowledge = vi.fn()
+  expect(h.passes.receive(trigger, acknowledge)).toBe('stored')
+  // The acknowledgement shares the Engine write's transaction, so a crash cannot store the Trigger without acknowledging its event.
+  expect(h.store.atomic).toHaveBeenCalledOnce()
+  expect(acknowledge).toHaveBeenCalledOnce()
   await h.passes.idle()
   expect(h.engine.evaluateDue).toHaveBeenCalledOnce()
 })
