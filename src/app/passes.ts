@@ -2,12 +2,14 @@
 import type { Engine, ReceiveResult, Trigger } from '../core/index.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { Effects } from './effects.ts'
+import type { Store } from './store.ts'
 
 export interface PassesHost {
   readonly engine: Pick<Engine, 'receive' | 'evaluateDue'>
   readonly effects: Pick<Effects, 'kick' | 'idle'>
   readonly health: HealthEntry
   readonly lifetime: AbortSignal
+  readonly store: Pick<Store, 'atomic'>
   configured(): boolean
   closing(): boolean
 }
@@ -31,9 +33,17 @@ export class Passes {
     clearInterval(this.timer)
     return Promise.allSettled([this.pumping, this.pumpAgain])
   }
-  receive(trigger: Trigger): ReceiveResult {
+  /**
+   * Stores a Trigger in one transaction with `acknowledge`, which records that its event was handled.
+   * A crash before the commit leaves the event unacknowledged for the next start to replay.
+   */
+  receive(trigger: Trigger, acknowledge?: () => void): ReceiveResult {
     if (this.host.closing()) throw new Error('Orchestrator is stopping')
-    const result = this.host.engine.receive(trigger)
+    const result = this.host.store.atomic(() => {
+      const value = this.host.engine.receive(trigger)
+      acknowledge?.()
+      return value
+    })
     if (result === 'stored') this.request()
     return result
   }

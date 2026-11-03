@@ -51,9 +51,10 @@ export { SCHEMA_VERSION }
 export class Store implements Repositories {
   readonly db: DatabaseSync
   /**
-   * Opens or creates the SQLite database at `path`, migrating schema 10 to schema 11 in a single transaction.
+   * Opens or creates the SQLite database at `path`, migrating a schema 10 database to schema 11 in a single transaction
+   * and creating the schema 12 event log tables on any supported database.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
-   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (11), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
+   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (12), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
   constructor(path: string, private readonly report: (error: unknown) => void = () => {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -80,13 +81,18 @@ export class Store implements Repositories {
             CREATE TABLE IF NOT EXISTS effect (kind TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, seq INTEGER NOT NULL,
               generation INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', due INTEGER NOT NULL,
               since TEXT NOT NULL, PRIMARY KEY (kind, key));
+            CREATE TABLE IF NOT EXISTS event_log (id TEXT PRIMARY KEY, source TEXT NOT NULL, dedupe_key TEXT NOT NULL,
+              thread_key TEXT NOT NULL, thread_seq INTEGER NOT NULL, at TEXT NOT NULL, value TEXT NOT NULL, received_at TEXT NOT NULL,
+              UNIQUE (source, dedupe_key), UNIQUE (thread_key, thread_seq));
+            CREATE TABLE IF NOT EXISTS inbox_ack (event_id TEXT PRIMARY KEY, acked_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS trigger_at ON trigger(at);
             CREATE INDEX IF NOT EXISTS trigger_thread_at ON trigger_thread(thread, at);
             CREATE INDEX IF NOT EXISTS decision_thread ON decision(thread);
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.addColumns()
-          if (migrating) migrateTo11(this)
+          // Schema 12 adds tables only, so a schema 11 database needs no data migration; schema 10 does.
+          if (version !== undefined && version < 11) migrateTo11(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {

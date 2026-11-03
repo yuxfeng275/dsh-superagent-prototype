@@ -28,6 +28,7 @@ import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
+import { EventLog } from './events.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
@@ -58,6 +59,7 @@ const now = (): string => new Date().toISOString()
  */
 export class Runtime extends Service implements SourceHost {
   readonly store: Store
+  readonly events: EventLog
   readonly setup: Setup
   readonly prompts: Prompts
   readonly effects: Effects
@@ -96,6 +98,7 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      const events = this.events = new EventLog(store)
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -111,6 +114,8 @@ export class Runtime extends Service implements SourceHost {
         // Sync source member lists once startup completes when a source plugin loads dynamically.
         if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
           .catch(() => { /* sync() records its failure in health. */ })
+        // Events of a Source kind that registers after the start replay once the runtime is ready, not while it is still starting.
+        void this.ready?.then(() => { this.replay(kind.kind) }).catch(() => { /* replay records its own failures. */ })
         return () => {}
       })
       const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
@@ -155,11 +160,11 @@ export class Runtime extends Service implements SourceHost {
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
-      const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
+      const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects, store,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => this.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -192,7 +197,14 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
-  receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
+  /**
+   * Records a Source event, then hands it to the Engine in one transaction that acknowledges the event once the Engine stored it.
+   * A crash between recording and acknowledging leaves the event for the next start to replay.
+   */
+  receive(trigger: Trigger): ReceiveResult {
+    const id = this.events.append(trigger)
+    return this.passes.receive(trigger, () => { this.events.ack(id) })
+  }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
@@ -212,10 +224,22 @@ export class Runtime extends Service implements SourceHost {
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
+    this.replay()
     this.executor.resume()
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
+  }
+  /** Hands events a crash left unacknowledged to the Engine again, which ignores the Triggers it already stored. */
+  private replay(source?: string): void {
+    if (this.closing()) return
+    for (const trigger of this.events.unacked()) {
+      if (source !== undefined && trigger.source !== source) continue
+      // A Source kind that has not registered yet cannot be filtered against; its event stays unacknowledged for its registration.
+      if (!this.sources.kind(trigger.source)) continue
+      try { this.receive(trigger) }
+      catch (error) { this.ctx.logger.warn('dsh-superagent could not replay event %s: %s', trigger.id, String(error)) }
+    }
   }
   private httpHost(): HttpHost {
     const runtime = this
