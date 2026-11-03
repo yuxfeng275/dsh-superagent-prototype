@@ -1,19 +1,26 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
 import { LIMITS } from './limits.ts'
 import { accessSync, constants, statSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { delimiter, isAbsolute, join } from 'node:path'
 import type { Volatile } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
+import { key } from './core/index.ts'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
+/** A configured identity name: letters, digits, dot, underscore and hyphen, at most 64 characters; empty selects the derived default. */
+const identity = (description: string) => s.string().pattern(/^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/).default('')
+  .description(`${description} Empty selects the derived default.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
+  instanceId: identity('Stable identity of this logical instance, such as `team-a`. It names the main Session and, in a multi-instance deployment, the instance\'s records. Empty derives a hash of `stateDir`.'),
+  replicaId: identity('Identity of this Runtime replica of the instance, such as the host name. A takeover replaces the replica that holds the instance lease. Empty uses the host name.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
@@ -24,6 +31,10 @@ export const Config = s.object({
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
+  /** Stable identity of the logical instance; a hash of `stateDir` unless configured. */
+  instanceId: string
+  /** Identity of this Runtime replica; the host name unless configured. */
+  replicaId: string
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
@@ -38,8 +49,9 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, instanceId, replicaId, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  return { stateDir, instanceId: instanceId || key(stateDir), replicaId: replicaId || hostname(),
+    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
 export const GithubAccountsSchema = z.object({

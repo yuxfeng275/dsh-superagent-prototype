@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { key } from '../src/core/index.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -42,13 +43,26 @@ vi.setConfig({ testTimeout: 30_000 })
 describe('configuration schema', () => {
   it('requires only the state directory and reads the editable fields through references', () => {
     expect(() => Config({})).toThrow('stateDir')
-    const read = machineOf(Config({ stateDir: join(dir, 'state') }))
+    const stateDir = join(dir, 'state')
+    const read = machineOf(Config({ stateDir }))
     // Limits are volatile references that the loader updates in place and callers read when used.
     expect({ ...read, promptMaxChars: read.promptMaxChars.get(), admissionContextMaxPages: read.admissionContextMaxPages.get(),
       admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
-      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
+      .toEqual({ stateDir, instanceId: key(stateDir), replicaId: hostname(), promptMaxChars: 100000,
+        admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+  })
+  it('keeps configured instance and replica identities, and rejects names that could not be addressed', () => {
+    expect(machineOf(Config(minimal({ instanceId: 'team-a', replicaId: 'host-1.example' }))))
+      .toMatchObject({ instanceId: 'team-a', replicaId: 'host-1.example' })
+    // Empty names select the derived defaults, so an explicit empty value is the same as no value.
+    expect(machineOf(Config(minimal({ instanceId: '', replicaId: '' }))))
+      .toMatchObject({ instanceId: key(join(dir, 'state')), replicaId: hostname() })
+    for (const name of [' team-a', 'team a', '.team', 'team/a', 'a'.repeat(65)]) {
+      expect(() => Config(minimal({ instanceId: name }))).toThrow()
+      expect(() => Config(minimal({ replicaId: name }))).toThrow()
+    }
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })
