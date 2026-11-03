@@ -29,6 +29,7 @@ import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
 import { EventLog } from './events.ts'
+import { Leases, type Lease } from './leases.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
@@ -51,6 +52,9 @@ import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
 const now = (): string => new Date().toISOString()
+/** How long the instance lease stays valid without a renewal, and how often the holder renews it. */
+const INSTANCE_LEASE_TTL_MS = 10_000
+const INSTANCE_LEASE_HEARTBEAT_MS = 3_000
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
@@ -60,6 +64,7 @@ const now = (): string => new Date().toISOString()
 export class Runtime extends Service implements SourceHost {
   readonly store: Store
   readonly events: EventLog
+  readonly leases: Leases
   readonly setup: Setup
   readonly prompts: Prompts
   readonly effects: Effects
@@ -80,6 +85,9 @@ export class Runtime extends Service implements SourceHost {
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
   private releaseLock?: () => Promise<void>
+  private instanceLease?: Lease
+  private leaseTimer?: ReturnType<typeof setInterval>
+  private fenceAt = 0
   private closingFlag = false
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
@@ -99,6 +107,7 @@ export class Runtime extends Service implements SourceHost {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
       const events = this.events = new EventLog(store)
+      this.leases = new Leases(store)
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -202,6 +211,9 @@ export class Runtime extends Service implements SourceHost {
    * A crash between recording and acknowledging leaves the event for the next start to replay.
    */
   receive(trigger: Trigger): ReceiveResult {
+    if (this.closing()) throw new Error('Orchestrator is stopping')
+    // A replica without the lease, or one that lost it, must not record or store events another replica may own.
+    if (!this.instanceLease) throw new Error('This replica does not hold the instance lease')
     const id = this.events.append(trigger)
     return this.passes.receive(trigger, () => { this.events.ack(id) })
   }
@@ -214,21 +226,34 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
-    if (!await this.setup.run(this.store.settings())) {
-      this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
+    // The instance lease makes this replica the only writer for the instance; a stale lease from a crashed replica is taken over.
+    const lease = this.leases.acquire('instance', this.machine.instanceId, this.machine.replicaId, INSTANCE_LEASE_TTL_MS)
+    if (!lease) {
+      this.runtimeHealth.set({ state: 'error', detail: 'The instance lease is held by another replica; this replica does not take work', at: now() })
       return
     }
-    this.sessions.install()
-    this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
-    for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
-    // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
-    if (this.closing()) return
-    this.replay()
-    this.executor.resume()
-    this.passes.start()
-    this.effects.start()
-    this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
+    this.holdLease(lease)
+    try {
+      if (!await this.setup.run(this.store.settings())) {
+        this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
+        return
+      }
+      this.sessions.install()
+      this.executor.install()
+      await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+      for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
+      // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
+      if (this.closing()) return
+      this.replay()
+      this.executor.resume()
+      this.passes.start()
+      this.effects.start()
+      this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
+    } catch (error) {
+      // A start that fails gives the lease back, so the next attempt can take over immediately instead of waiting for expiry.
+      this.dropLease()
+      throw error
+    }
   }
   /** Hands events a crash left unacknowledged to the Engine again, which ignores the Triggers it already stored. */
   private replay(source?: string): void {
@@ -240,6 +265,36 @@ export class Runtime extends Service implements SourceHost {
       try { this.receive(trigger) }
       catch (error) { this.ctx.logger.warn('dsh-superagent could not replay event %s: %s', trigger.id, String(error)) }
     }
+  }
+  /**
+   * Keeps the instance lease renewed, and stops this replica at the local deadline once it can no longer prove it holds it.
+   * The deadline is measured on the monotonic clock so a wall-clock jump cannot extend a lease the database no longer grants.
+   */
+  private holdLease(lease: Lease): void {
+    this.instanceLease = lease
+    this.fenceAt = performance.now() + INSTANCE_LEASE_TTL_MS
+    this.leaseTimer = setInterval(() => {
+      if (this.closing()) return
+      let renewed = false
+      try { renewed = this.leases.renew('instance', lease.resourceId, lease.holder, lease.epoch, INSTANCE_LEASE_TTL_MS) }
+      catch (error) { this.ctx.logger.warn('dsh-superagent could not renew the instance lease: %s', String(error)) }
+      if (renewed) { this.fenceAt = performance.now() + INSTANCE_LEASE_TTL_MS; return }
+      if (performance.now() >= this.fenceAt) this.fence()
+    }, INSTANCE_LEASE_HEARTBEAT_MS)
+  }
+  /** Stops this replica because another may hold the instance lease now. */
+  private fence(): void {
+    this.runtimeHealth.set({ state: 'error', detail: 'The instance lease was lost; this replica stops', at: now() })
+    void this.stop()
+  }
+  /** Stops renewing and gives back the instance lease, if this replica still has it. */
+  private dropLease(): void {
+    if (this.leaseTimer !== undefined) { clearInterval(this.leaseTimer); this.leaseTimer = undefined }
+    const lease = this.instanceLease
+    this.instanceLease = undefined
+    if (!lease) return
+    try { this.leases.release('instance', lease.resourceId, lease.holder, lease.epoch) }
+    catch (error) { this.ctx.logger.warn('dsh-superagent could not release the instance lease: %s', String(error)) }
   }
   private httpHost(): HttpHost {
     const runtime = this
@@ -268,6 +323,7 @@ export class Runtime extends Service implements SourceHost {
       await this.ctx.sessionPersistence.flush()
     } finally {
       // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.
+      this.dropLease()
       this.setup.restore()
       try { this.store.close() } finally {
         const unreleased = (error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release its state directory lock: %s',
