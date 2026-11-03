@@ -7,7 +7,7 @@ import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
 
 export interface OutboxHost {
-  readonly store: Pick<Store, 'atomic' | 'receipts'>
+  readonly store: Pick<Store, 'atomic' | 'receipts' | 'fencedOut'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
@@ -40,6 +40,8 @@ export class Outbox implements OutboxPort {
     const { store, sources, commands } = this.host
     const receipt = store.receipts.get(id)
     if (receipt?.status !== 'pending') return
+    // A fenced replica sends nothing: the receipt stays pending for the replica that takes over.
+    if (store.fencedOut) throw new Later('The instance lease was lost; this replica no longer writes')
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')

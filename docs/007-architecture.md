@@ -157,6 +157,7 @@ Its interfaces are grouped by purpose:
 - **Source metadata:** `threads.describe` and `threads.patchMeta` update Source-owned Thread metadata.
 - **Settings:** `settings`, `saveSettings`, `blockRevision` and `settingsHistory`. Settings and prompts use numbered `Versions` (`src/app/versions.ts`).
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
+- **Fencing:** `fence` stops transactional writes once the instance lease is lost, and `fencedOut` reports it; reads continue so the panel and diagnostics still work.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
 `afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup, and schemas 12 and 13 add the event log, acknowledgement and lease tables without a data migration.
@@ -167,7 +168,7 @@ Its interfaces are grouped by purpose:
 
 ### Leases
 
-`Leases` (`src/app/leases.ts`) stores leases of resources and a floor of the highest epoch ever allocated for each. Acquisition gives a resource to one holder while its lease is live and otherwise takes it over with an epoch larger than both the current row and the floor, so an epoch is never reused. `renew` succeeds only for the holder and epoch that still own a live lease; the holder therefore self-fences on its own clock once its deadline passed, rather than trusting a database it may not reach. Runtime acquires the `instance` lease under its replica identity, renews it, releases it on shutdown, and stops itself when it can no longer prove it holds it; a replica without the lease takes no work. The floor lives in the same SQLite database, so restoring a backup that predates it could reuse an epoch; the plan's external epoch marker belongs to the control-plane step.
+`Leases` (`src/app/leases.ts`) stores leases of resources and a floor of the highest epoch ever allocated for each. Acquisition gives a resource to one holder while its lease is live and otherwise takes it over with an epoch larger than both the current row and the floor, so an epoch is never reused. `renew` succeeds only for the holder and epoch that still own a live lease; the holder therefore self-fences on its own clock once its deadline passed, rather than trusting a database it may not reach. Runtime acquires the `instance` lease under its replica identity, renews it, releases it on shutdown, and stops itself when it can no longer prove it holds it; a replica without the lease takes no work. When Runtime fences, it fences the Store first, so an effect already under way cannot write domain state another replica may own. The floor lives in the same SQLite database, so restoring a backup that predates it could reuse an epoch; the plan's external epoch marker belongs to the control-plane step.
 
 ### Effects
 
@@ -175,7 +176,7 @@ Its interfaces are grouped by purpose:
 
 Each kind/key pair has one row. Enqueuing the same waiting key replaces its payload and makes it due immediately without changing queue order. `handle(kind, run, options)` registers one handler per kind. It processes due rows oldest first, up to the concurrency limit.
 
-Failures retry with exponential backoff. Throwing `Later` defers work without counting a failure, for example when no worker slot is available. `start` begins processing after setup, `drain` stops it during shutdown while preserving pending rows, and `pending`/`idle` expose queue state.
+Failures retry with exponential backoff. Throwing `Later` defers work without counting a failure, for example when no worker slot is available. `start` begins processing after setup, `drain` stops it during shutdown while preserving pending rows, and `pending`/`idle` expose queue state. A fenced Store starts no new effect: the rows wait for the replica that takes over.
 
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |

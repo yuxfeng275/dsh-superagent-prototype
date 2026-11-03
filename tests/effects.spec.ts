@@ -36,6 +36,17 @@ it('runs an effect queued inside a transaction once it commits, and none from a 
   expect(effects.pending('relay')).toBe(false)
 })
 
+it('starts no effect once the instance is fenced, leaving the row for the next replica', async () => {
+  const run = vi.fn(async () => {})
+  effects.handle('relay', run)
+  effects.enqueue('relay', 'fenced', relay('a'))
+  store.fence()
+  effects.kick()
+  await effects.idle()
+  expect(run).not.toHaveBeenCalled()
+  expect(effects.pending('relay')).toBe(true)
+})
+
 it('keeps one effect per key with the latest payload, and runs it again when a new payload arrives while it runs', async () => {
   const hold = deferred()
   const run = vi.fn(async (payload: { text: string }) => { if (payload.text === 'first') await hold.promise })

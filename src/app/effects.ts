@@ -101,7 +101,8 @@ export class Effects {
     await Promise.allSettled([...this.tasks].map(task => task.done))
   }
   private dispatch(): void {
-    if (!this.started || this.stopped) return
+    // A fenced replica starts no new effect: its writes may belong to another replica now.
+    if (!this.started || this.stopped || this.store.fencedOut) return
     for (const [kind, handler] of this.handlers) {
       try {
         const running = new Set([...this.tasks].filter(task => task.kind === kind).map(task => task.key))

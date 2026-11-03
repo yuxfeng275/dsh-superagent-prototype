@@ -23,6 +23,15 @@ it('refuses databases newer than this build and rolls back failed atomic work', 
   store.set('schema', SCHEMA_VERSION + 1); store.close()
   expect(() => new Store(path)).toThrow('Unsupported')
 })
+it('stops transactional writes once fenced, while reads continue', () => {
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  store.set('before', 1)
+  store.fence()
+  expect(store.fencedOut).toBe(true)
+  expect(() => store.atomic(() => { store.set('after', 1) })).toThrow('The instance lease was lost; this replica no longer writes')
+  expect([store.get('before'), store.get('after')]).toEqual([1, undefined])
+  store.close()
+})
 it('finds triggers by thread', () => {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
   store.triggers.save({ id: 'a', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_1:om_%_x' }], actor: { source: 'feishu', id: 'u' }, human: true, at: '2', text: 'later', meta: {} })
