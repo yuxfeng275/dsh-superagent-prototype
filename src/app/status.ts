@@ -177,7 +177,9 @@ function icon(name: string): Buffer | undefined {
 let bundle: Promise<Buffer> | undefined
 /** The built browser app next to the compiled entry; a source checkout that has not been built gets a 503. */
 function appBundle(): Promise<Buffer> {
-  return bundle ??= readFile(fileURLToPath(new URL('./status-app.js', import.meta.url)))
+  bundle ??= readFile(fileURLToPath(new URL('./status-app.js', import.meta.url)))
+    .catch((error: unknown) => { bundle = undefined; throw error })
+  return bundle
 }
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY',

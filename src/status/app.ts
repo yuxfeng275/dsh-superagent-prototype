@@ -16,7 +16,10 @@ const TEXT = {
   refresh: ['刷新', 'Refresh'], updated: ['截至 {time}', 'As of {time}'], loading: ['正在读取…', 'Loading…'],
   retry: ['重试', 'Retry'], offline: ['离线，显示 {time} 的最近快照', 'Offline; showing the snapshot from {time}'],
   offlineNote: ['只读快照，操作请回 Web 面板或飞书', 'Read-only snapshot; use the Web panel or Feishu to act'],
-  person: ['需要你', 'Needs you'], noPerson: ['现在没有需要你处理的事', 'Nothing needs you right now'],
+  person: ['需要你', 'Needs you'], noSources: ['没有来源', 'No sources'], pausedNote: ['执行器已暂停', 'Executor paused'],
+  codeExpired: ['配对码已过期，请重新生成', 'The pairing code expired; generate a new one'],
+  rateLimited: ['尝试次数过多，请稍后再试', 'Too many attempts; wait a minute'],
+  noPerson: ['现在没有需要你处理的事', 'Nothing needs you right now'],
   problems: ['问题', 'Problems'], noProblems: ['没有发现需要处理的问题', 'No problems need attention'],
   run: ['运行', 'Running'], executor: ['执行器', 'Executor'], running: ['执行中', 'Running'], queued: ['排队', 'Queued'],
   idle: ['空闲', 'Idle'], flow: ['最近 24 小时', 'Last 24 hours'], received: ['收到', 'Received'],
@@ -201,7 +204,7 @@ function problems(list: Problem[]): string {
     <div class="row-meta"><span class="tag warn">${escapeHtml(problem.kind)}</span></div></li>`).join('')}</ul>`
 }
 function sourceRows(list: StatusSummary['sources']): string {
-  if (!list.length) return `<p class="empty">${escapeHtml(t('noTickets'))}</p>`
+  if (!list.length) return `<p class="empty">${escapeHtml(t('noSources'))}</p>`
   return `<ul class="list">${list.map(source => {
     const bad = source.health.filter(part => part.state === 'error').length
     return `<li class="row"><div class="row-title">${escapeHtml(channel(source.title))} <span class="tag ${source.state === 'ready' ? 'ok' : source.state === 'error' ? 'error' : 'warn'}">${escapeHtml(domainText('state', source.state))}</span></div>
@@ -215,7 +218,7 @@ function overviewPage(summary: StatusSummary, offlineSnapshot = false): string {
   const flow = summary.overview.flow
   return layout('overview', `<div class="grid">
     <section class="card wide" aria-labelledby="person-title"><h2 id="person-title">${escapeHtml(t('person'))} (${person.length})</h2>
-      ${summary.paused ? `<p class="tag warn">${escapeHtml(t('executor'))} paused</p>` : ''}
+      ${summary.paused ? `<p class="tag warn">${escapeHtml(t('pausedNote'))}</p>` : ''}
       ${person.length ? `<ul class="list">${person.map(ticketRow).join('')}</ul>` : `<p class="empty">${escapeHtml(t('noPerson'))}</p>`}
     </section>
     <section class="card" aria-labelledby="problems-title"><h2 id="problems-title">${escapeHtml(t('problems'))} (${summary.overview.problems.length})</h2>
@@ -380,7 +383,9 @@ function bind(root: HTMLElement): void {
       void render()
     }).catch((failure: unknown) => {
       error.hidden = false
-      error.textContent = t('pairFailed', { reason: isFailure(failure) ? failure.message : t('invalidCode') })
+      const reason = isFailure(failure) ? failure.code === 'expired' ? t('codeExpired') : failure.code === 'rateLimited' ? t('rateLimited')
+        : failure.code === 'limit' ? t('deviceLimit') : t('invalidCode') : t('invalidCode')
+      error.textContent = t('pairFailed', { reason })
       form.querySelector('button')!.removeAttribute('disabled')
     })
   })
