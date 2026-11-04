@@ -85,3 +85,23 @@ it('settles a receipt the platform already accepted instead of sending the messa
   await h.runtime.pump(); await h.runtime.sendReplies()
   expect([h.runtime.outbox.status('accepted'), lark.mock.calls.length]).toEqual(['sent', 0])
 })
+
+it('settles pending receipts the ledger already records as sent, before delivery starts', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'outbox-reconcile-'))
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    const effects = { handle: vi.fn(), enqueue: vi.fn(), cancel: vi.fn(), idle: vi.fn(async () => {}) }
+    const ledger = new EffectLedger(store)
+    const outbox = new Outbox({ store, effects, sources: {} as never, commands: {} as never, ledger,
+      instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
+    const message: OutboundMessage = { id: 'reconciled', channel: { source: 'github', thread: 'github:8', address: { number: '8' } }, text: 'Done', kind: 'notice' }
+    outbox.send(message)
+    // The platform accepted the message and the ledger recorded it, but the process crashed before the receipt settled.
+    ledger.sent(replyEffect(message.id), { by: 'platform-idempotency' })
+    expect(outbox.reconcile()).toBe(1)
+    expect([store.receipts.get(message.id)?.status, ledger.get(replyEffect(message.id))?.state]).toEqual(['sent', 'confirmed'])
+    expect(effects.cancel).toHaveBeenCalledWith('reply', message.id)
+    // Once settled, the next start has nothing left to reconcile.
+    expect(outbox.reconcile()).toBe(0)
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }) }
+})

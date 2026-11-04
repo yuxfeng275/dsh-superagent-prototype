@@ -38,7 +38,7 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 | --- | --- | --- |
 | Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
-| Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt, its effect-ledger intent and its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`, then records `sent`; a message waits while its Source is off, is settled without sending when the ledger already says `sent`, and is dropped when the conversation is gone or not listened to |
+| Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt, its effect-ledger intent and its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`, then records `sent`; a message waits while its Source is off, is settled without sending when the ledger already says `sent`, and is dropped when the conversation is gone or not listened to. At start, before delivery begins, `reconcile` settles pending receipts the ledger already records as `sent` and confirms them |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
 
 ### Engine
@@ -331,7 +331,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/events.ts` | `EventLog`: recording each Trigger before intake, its per-Thread sequence, the local acknowledgement, and the unacknowledged events a start replays |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
 | `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape; schemas 12 to 14 add tables only |
-| `src/app/ledger.ts` | `EffectLedger`: each controlled external effect by idempotency key, from `intent` to `sent` or `failed`, with the platform idempotency a retry relies on |
+| `src/app/ledger.ts` | `EffectLedger`: each controlled external effect by idempotency key, from `intent` to `sent`, `confirmed` or `failed`, with the platform idempotency a retry relies on |
 | `src/app/leases.ts` | `Leases`: the lease of a resource, its holder and epoch, the epoch floor, renewal and release |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |

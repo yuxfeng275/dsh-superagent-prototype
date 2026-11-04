@@ -49,6 +49,12 @@ export class EffectLedger {
       WHERE idempotency_key = ?`).run(this.now(), JSON.stringify(detail), key))
   }
 
+  /** Records that a sent effect is confirmed, such as when a restart settled its receipt from this record. */
+  confirm(key: string): void {
+    this.store.atomic(() => this.store.db.prepare(`UPDATE effect_ledger SET state = 'confirmed', updated_at = ?
+      WHERE idempotency_key = ? AND state = 'sent'`).run(this.now(), key))
+  }
+
   /** The record of one effect, when it has one. */
   get(key: string): EffectRecord | undefined {
     const row = this.store.db.prepare(`SELECT idempotency_key, instance_id, kind, target, lease_epoch, state, external_id,

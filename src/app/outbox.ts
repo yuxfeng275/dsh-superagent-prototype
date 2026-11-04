@@ -15,7 +15,7 @@ export interface OutboxHost {
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
-  readonly ledger: Pick<EffectLedger, 'intent' | 'sent' | 'failed' | 'get'>
+  readonly ledger: Pick<EffectLedger, 'intent' | 'sent' | 'failed' | 'confirm' | 'get'>
   readonly instanceId: string
   /** The instance lease epoch the effect runs under. */
   epoch(): number
@@ -55,6 +55,27 @@ export class Outbox implements OutboxPort {
     })
   }
   sent(): Promise<void> { return this.host.effects.idle('reply') }
+  /**
+   * Settles pending receipts whose effect the ledger already records as sent, before delivery starts.
+   * A crash between the platform accepting a message and its receipt settling leaves this state; settling it from the
+   * ledger means the next start neither sends the message again nor waits for a source to become available.
+   * @returns How many receipts the ledger settled.
+   */
+  reconcile(): number {
+    const { store, effects, ledger } = this.host
+    let settled = 0
+    for (const receipt of store.receipts.waiting()) {
+      const key = replyEffect(receipt.id)
+      if (ledger.get(key)?.state !== 'sent') continue
+      store.atomic(() => {
+        store.receipts.settle(receipt, 'sent')
+        ledger.confirm(key)
+        effects.cancel('reply', receipt.id)
+      })
+      settled++
+    }
+    return settled
+  }
   /** Records the effect's intent, keeping any record a retry already has. */
   private record(message: OutboundMessage): void {
     this.host.ledger.intent(replyEffect(message.id), { instanceId: this.host.instanceId, kind: 'reply',
@@ -68,8 +89,8 @@ export class Outbox implements OutboxPort {
     if (store.fencedOut) throw new Later('The instance lease was lost; this replica no longer writes')
     const key = replyEffect(id)
     const recorded = ledger.get(key)
-    // A crash after the platform accepted the message but before the receipt settled leaves `sent`: settle without sending.
-    if (recorded?.state === 'sent') { store.receipts.settle(receipt, 'sent'); return }
+    // A crash after the platform accepted the message but before the receipt settled leaves `sent` (or `confirmed`): settle without sending.
+    if (recorded?.state === 'sent' || recorded?.state === 'confirmed') { store.receipts.settle(receipt, 'sent'); return }
     // A receipt recorded before the ledger existed, or by an older version, gets its intent now.
     if (!recorded) this.record(receipt)
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
