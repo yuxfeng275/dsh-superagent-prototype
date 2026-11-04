@@ -1,4 +1,7 @@
-/** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
+/**
+ * Loopback-only management HTTP routes with same-origin enforcement for the web panel.
+ * The routes register on any bound Web server; sameOrigin() still admits only a loopback-origin panel request.
+ */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -110,6 +113,7 @@ export function stateView(runtime: HttpHost) {
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
     masterId: runtime.masterId, paused: settings.paused, health: runtime.health,
+    status: { enabled: runtime.machine.status.enabled, url: '/status/' },
     environments: runtime.environments.list().map(environment => ({ ...environment,
       online: runtime.environments.isOnline(environment, new Date().toISOString()) })) }
 }
@@ -233,7 +237,6 @@ function match(table: Routes, method: string, segments: string[]) {
   return undefined
 }
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
-  if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
   const table = routes(runtime)
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {

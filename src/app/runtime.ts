@@ -38,6 +38,7 @@ import { EffectLedger } from './ledger.ts'
 import { Leases, type Lease } from './leases.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
+import { registerStatus } from './status.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
@@ -251,6 +252,7 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
+    this.disposers.push(registerStatus(this.ctx, this.httpHost()))
     // The instance lease makes this replica the only writer for the instance; a stale lease from a crashed replica is taken over.
     const lease = this.leases.acquire('instance', this.machine.instanceId, this.machine.replicaId, INSTANCE_LEASE_TTL_MS)
     if (!lease) {

@@ -30,6 +30,7 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 - [009 WeCom and DingTalk Sources](docs/009-wecom-dingtalk-sources.md)
+- [010 Desktop and phone status](docs/010-desktop-mobile-status.md): the read-only status app for a phone or a second desktop, pairing, TLS exposure and its limits
 
 ## Development
 

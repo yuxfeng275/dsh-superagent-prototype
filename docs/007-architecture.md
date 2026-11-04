@@ -362,6 +362,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
+| `src/app/status.ts` | The read-only `/status` surface: the public app shell, manifest, service worker and icons, the authenticated read-only data routes, loopback pairing and device management, and the summary composed from the panel's own views |
+| `src/app/devices.ts` | `Devices`: signed read-only device sessions for `/status`, one-time pairing codes kept in memory, expiry, the device limit, rate limiting and revocation; sessions live in `KV.status` |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
@@ -424,6 +426,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
+| `src/status/app.ts` | The standalone browser app of `/status` for phone and desktop: routing, rendering, pairing, the locally generated pairing code page, and the offline summary snapshot |
+| `src/status/shell.ts` | The shell of the standalone app: responsive light/dark stylesheet, HTML document, web app manifest, service worker and generated PNG icons |
 
 `src/sources/github.ts`, `src/sources/feishu.ts`, `src/sources/wecom.ts` and `src/sources/dingtalk.ts` are also the entries of the four Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch`, `./wecom-watch` and `./dingtalk-watch`. The bundle's `cordis.patch.yml` inserts all five plugins, with Feishu, WeCom and DingTalk disabled.
 
@@ -457,6 +461,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
+| `tests/status.spec.ts` | The read-only device sessions, the `/status` public, local and remote authentication rules, pairing and revocation, and the summary composed from the panel's views |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |

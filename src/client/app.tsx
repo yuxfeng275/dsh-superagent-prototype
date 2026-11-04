@@ -100,6 +100,7 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
 
 function Header({ masterId }: { masterId: string | undefined }) {
   const { t, call, openSession, notify } = usePanel()
+  const { state } = usePanelData()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -131,6 +132,8 @@ function Header({ masterId }: { masterId: string | undefined }) {
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
+      {state?.status?.enabled && <Button variant="outline" size="sm" icon={<Icon name="external" size={14} />} title={t('statusOpen')}
+        onClick={() => { window.open(state.status.url, '_blank', 'noopener') }}>{t('statusOpen')}</Button>}
       <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
         onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
     </div>
