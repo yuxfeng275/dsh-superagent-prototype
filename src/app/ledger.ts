@@ -3,6 +3,8 @@ import type { Store } from './store.ts'
 
 /** Where an effect stands: recorded before running, accepted by the platform, confirmed by a later read, failed, or reconciled. */
 export type EffectState = 'intent' | 'sent' | 'confirmed' | 'failed' | 'reconciled'
+/** How many effects stand in each state; the `ledger` health entry reports them. */
+export interface EffectCounts { intent: number; sent: number; confirmed: number; failed: number; reconciled: number }
 /** One external effect, by idempotency key. */
 export interface EffectRecord {
   idempotencyKey: string
@@ -53,6 +55,16 @@ export class EffectLedger {
   confirm(key: string): void {
     this.store.atomic(() => this.store.db.prepare(`UPDATE effect_ledger SET state = 'confirmed', updated_at = ?
       WHERE idempotency_key = ? AND state = 'sent'`).run(this.now(), key))
+  }
+
+  /** The number of effects in each state, in one read, for the `ledger` health entry. */
+  summary(): EffectCounts {
+    const counts: EffectCounts = { intent: 0, sent: 0, confirmed: 0, failed: 0, reconciled: 0 }
+    for (const row of this.store.db.prepare('SELECT state, COUNT(*) AS count FROM effect_ledger GROUP BY state').all()) {
+      const state = String(row.state) as keyof EffectCounts
+      if (state in counts) counts[state] = Number(row.count)
+    }
+    return counts
   }
 
   /** The record of one effect, when it has one. */

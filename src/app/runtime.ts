@@ -96,6 +96,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
   private readonly edgeHealth = this.board.claim('edge', { state: 'paused', detail: 'Edge worker API is disabled' })
+  private readonly ledgerHealth = this.board.claim('ledger', { state: 'ready', detail: 'No outbound effects yet' })
   readonly masterId: string
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
@@ -103,6 +104,7 @@ export class Runtime extends Service implements SourceHost {
   private releaseLock?: () => Promise<void>
   private instanceLease?: Lease
   private leaseTimer?: ReturnType<typeof setInterval>
+  private ledgerTimer?: ReturnType<typeof setInterval>
   private fenceAt = 0
   private closingFlag = false
   private stopping?: Promise<void>
@@ -167,8 +169,8 @@ export class Runtime extends Service implements SourceHost {
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
-      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, ledger, instanceId: machine.instanceId,
-        epoch: () => this.instanceLease?.epoch ?? 0, paused: () => this.paused() })
+      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, ledger, ledgerHealth: this.ledgerHealth,
+        instanceId: machine.instanceId, epoch: () => this.instanceLease?.epoch ?? 0, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
@@ -273,6 +275,16 @@ export class Runtime extends Service implements SourceHost {
       this.executor.resume()
       this.passes.start()
       this.effects.start()
+      this.outbox.report()
+      // Periodic reconciliation settles receipts the ledger knows the platform accepted even if their reply effect was lost;
+      // it also refreshes the ledger counts and duplicate-send metric the panel shows.
+      this.ledgerTimer = setInterval(() => {
+        if (this.closing()) return
+        try { this.outbox.reconcile() } catch (error) {
+          this.ctx.logger.warn('dsh-superagent could not reconcile the effect ledger: %s', String(error))
+        }
+      }, 60_000)
+      this.ledgerTimer.unref?.()
       this.startEdgeTasks()
       await this.startEdge()
       this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
@@ -374,6 +386,7 @@ export class Runtime extends Service implements SourceHost {
     try {
       this.assessor.stop()
       if (this.edgeTaskTimer !== undefined) { clearInterval(this.edgeTaskTimer); this.edgeTaskTimer = undefined }
+      if (this.ledgerTimer !== undefined) { clearInterval(this.ledgerTimer); this.ledgerTimer = undefined }
       await this.edgeServer?.close()
       this.edgeServer = undefined
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]

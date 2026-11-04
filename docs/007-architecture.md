@@ -331,7 +331,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/events.ts` | `EventLog`: recording each Trigger before intake, its per-Thread sequence, the local acknowledgement, and the unacknowledged events a start replays |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
 | `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape; schemas 12 to 15 add tables only |
-| `src/app/ledger.ts` | `EffectLedger`: each controlled external effect by idempotency key, from `intent` to `sent`, `confirmed` or `failed`, with the platform idempotency a retry relies on |
+| `src/app/ledger.ts` | `EffectLedger`: each controlled external effect by idempotency key, from `intent` to `sent`, `confirmed` or `failed`, with the platform idempotency a retry relies on, and a per-state summary for the `ledger` health entry |
 | `src/app/leases.ts` | `Leases`: the lease of a resource, its holder and epoch, the epoch floor, renewal and release |
 | `src/app/environments.ts` | `Environments`: the worker-environment registry, heartbeats, effective online state and operator state |
 | `src/app/edge-jobs.ts` | `EdgeJobs`: the durable job queue a worker host claims, with leases, attempts, expiry and reconnect reconciliation |
@@ -469,7 +469,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/instance-identity.spec.ts` | The instance and replica identities a running Runtime derives, and the main Session name it keeps |
 | `tests/event-log.spec.ts` | The event log: one row per Source event, its per-Thread sequence, acknowledgement, and the replay of an event a crash left unacknowledged |
 | `tests/leases.spec.ts` | Leases: one live holder, a monotonic epoch floor, renewal deadlines, the Runtime's instance lease and its takeover of a stale one |
-| `tests/ledger.spec.ts` | The effect ledger: one record per idempotency key, its intent kept on a retry, and its sent or failed outcome |
+| `tests/ledger.spec.ts` | The effect ledger: one record per idempotency key, its intent kept on a retry, its sent or failed outcome, and its per-state summary |
 | `tests/recovery.spec.ts` | A restart on the same state directory: a Source event delivered again keeps one Trigger and one Ticket, and a reply the platform accepted before the crash is settled from the ledger |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
