@@ -16,6 +16,12 @@ const absolute = (description: string) => s.string().pattern(/^\//).description(
 /** A configured identity name: letters, digits, dot, underscore and hyphen, at most 64 characters; empty selects the derived default. */
 const identity = (description: string) => s.string().pattern(/^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$/).default('')
   .description(`${description} Empty selects the derived default.`)
+/** The edge worker API a router exposes to worker hosts on other machines. */
+const EdgeSettings = s.object({
+  host: s.string().default('127.0.0.1').description('Address the edge worker API binds to. Use 0.0.0.0 to accept worker hosts from the network; the API requires the token.'),
+  port: s.number().min(0).max(65535).step(1).default(0).description('Port of the edge worker API; 0 disables it.'),
+  token: s.string().default('').description('Bearer token every worker host must present; required when port is non-zero.'),
+})
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
@@ -27,8 +33,10 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  edge: EdgeSettings,
 })
 export type DeploymentConfig = ReturnType<typeof Config>
+export interface EdgeConfig { host: string; port: number; token: string }
 export interface Machine {
   stateDir: string
   /** Stable identity of the logical instance; a hash of `stateDir` unless configured. */
@@ -38,6 +46,8 @@ export interface Machine {
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  /** Edge worker API; port 0 keeps it off. */
+  edge: EdgeConfig
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -50,8 +60,10 @@ export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { stateDir, instanceId, replicaId, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  const edge = config.edge ?? { host: '127.0.0.1', port: 0, token: '' }
+  if (edge.port > 0 && !edge.token) throw new Error('dsh-superagent edge.port needs an edge.token; worker hosts must authenticate')
   return { stateDir, instanceId: instanceId || key(stateDir), replicaId: replicaId || hostname(),
-    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, edge: { host: edge.host, port: edge.port, token: edge.token } }
 }
 
 export const GithubAccountsSchema = z.object({

@@ -20,7 +20,7 @@ export type DingtalkMessage = z.infer<typeof DingtalkMessageSchema>
 /** Parses a Stream callback payload; malformed payloads throw so the caller can report the message as unreadable. */
 export function dingtalkMessage(data: unknown): DingtalkMessage { return DingtalkMessageSchema.parse(data) }
 /** Parses DingTalk's millisecond `createAt`, falling back to the receive time when it is absent. */
-export function dingtalkTime(value: number | string | undefined): string {
+export function dingtalkTime(value: number | string | null | undefined): string {
   const time = Number(value)
   return Number.isFinite(time) && time > 0 ? new Date(time).toISOString() : new Date().toISOString()
 }

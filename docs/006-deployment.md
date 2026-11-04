@@ -140,8 +140,23 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | `instanceId` | no | Stable identity of this logical instance, such as `team-a`. It names the main Session (`orchestrator-<instanceId>`) and, in a multi-instance deployment, the instance's records. Defaults to a hash of `stateDir`. Changing it does not rename an existing main Session |
 | `replicaId` | no | Identity of this Runtime replica, such as the host name. Defaults to the host name. A later takeover replaces the replica that holds the instance lease |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
+| `edge.host` | no | Address the edge worker API binds to. Defaults to `127.0.0.1`; use `0.0.0.0` to accept worker hosts on the network |
+| `edge.port` | no | Port of the edge worker API. Defaults to `0`, which keeps it off |
+| `edge.token` | when `edge.port` is set | Bearer token every worker host must present |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+
+> **Worker environments.** The edge worker API lets machines other than the router run work. Start it by setting `edge.port` and `edge.token`; the router logs the bound address and reports it as the `edge` health entry. On each worker machine, install this package and run its worker host:
+
+```sh
+DSH_SUPERAGENT_EDGE_URL=http://hub.example:3919 \
+DSH_SUPERAGENT_EDGE_TOKEN=<token> \
+DSH_SUPERAGENT_EDGE_WORK_ROOT=/srv/dsh-work \
+DSH_SUPERAGENT_EDGE_NAME=mac-mini \
+dsh-superagent-worker
+```
+
+The host registers its name, labels, capabilities and capacity, heartbeats every 10 seconds, and long-polls for jobs. It announces the `dsh` capability because it runs agent tasks. A `prepare` job creates a Ticket workspace under `DSH_SUPERAGENT_EDGE_WORK_ROOT` by running the job command there. A `task` job runs one self-contained DSH agent turn with `dsh --profile headless --json` (override with `DSH_SUPERAGENT_EDGE_DSH`, `..._PROFILE` and `..._DSH_HOME`); the main Session dispatches one with `orchestrator_worker` on an explicit human request, and receives the final answer later as an `edge_task_result` message. Pass the same `cwd` and the result's `session_id` to continue a conversation. The host's DSH home defaults to `<work root>/.dsh`; give that directory's `.env` the model credentials the headless profile needs, or point `DSH_SUPERAGENT_EDGE_DSH_HOME` at a configured home. Every job path must remain under the work root. The token authenticates hosts but is not a network boundary: bind the API to a trusted network and keep the token secret.
 
 ## Start and stop
 
