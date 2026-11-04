@@ -49,9 +49,11 @@ describe('configuration schema', () => {
     expect({ ...read, promptMaxChars: read.promptMaxChars.get(), admissionContextMaxPages: read.admissionContextMaxPages.get(),
       admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
       .toEqual({ stateDir, instanceId: key(stateDir), replicaId: hostname(), promptMaxChars: 100000,
-        admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
+        admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000, edge: { host: '127.0.0.1', port: 0, token: '' } })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+    // An edge listener without a token would accept unauthenticated worker hosts.
+    expect(() => machineOf(Config(minimal({ stateDir, edge: { port: 3919 } })))).toThrow('edge.port needs an edge.token')
   })
   it('keeps configured instance and replica identities, and rejects names that could not be addressed', () => {
     expect(machineOf(Config(minimal({ instanceId: 'team-a', replicaId: 'host-1.example' }))))

@@ -160,7 +160,7 @@ Its interfaces are grouped by purpose:
 - **Fencing:** `fence` stops transactional writes once the instance lease is lost, and `fencedOut` reports it; reads continue so the panel and diagnostics still work.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup, and schemas 12 to 14 add the event log, acknowledgement, lease and effect-ledger tables without a data migration.
+`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup, and schemas 12 to 15 add the event log, acknowledgement, lease, effect-ledger, environment and worker-job tables without a data migration.
 
 ### Events
 
@@ -330,9 +330,16 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/events.ts` | `EventLog`: recording each Trigger before intake, its per-Thread sequence, the local acknowledgement, and the unacknowledged events a start replays |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape; schemas 12 to 14 add tables only |
+| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape; schemas 12 to 15 add tables only |
 | `src/app/ledger.ts` | `EffectLedger`: each controlled external effect by idempotency key, from `intent` to `sent`, `confirmed` or `failed`, with the platform idempotency a retry relies on |
 | `src/app/leases.ts` | `Leases`: the lease of a resource, its holder and epoch, the epoch floor, renewal and release |
+| `src/app/environments.ts` | `Environments`: the worker-environment registry, heartbeats, effective online state and operator state |
+| `src/app/edge-jobs.ts` | `EdgeJobs`: the durable job queue a worker host claims, with leases, attempts, expiry and reconnect reconciliation |
+| `src/app/scheduler.ts` | `Scheduler`: placement by pin, capability, label, capacity, affinity and freshness, with a wait reason when nothing matches |
+| `src/app/edge-tasks.ts` | `EdgeTasks`: the router's dispatch of agent tasks to a worker environment, the finished results it exposes, and the relay marker that keeps a restart from repeating one |
+| `src/app/edge-server.ts` | `EdgeServer`: the token-authenticated edge HTTP API (register, heartbeat, long-poll, start, finish, fail, reconcile) |
+| `src/edge/worker-host.ts` | `WorkerHost`: the process installed on a worker machine that registers, heartbeats, claims jobs and runs them under its work root |
+| `src/edge/worker-host-cli.ts` | The `dsh-superagent-worker` command: reads the host's router URL, token, work root, labels, capabilities and capacity from the environment and starts `WorkerHost` |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -472,6 +479,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
+| `tests/environments.spec.ts`, `tests/scheduler.spec.ts`, `tests/edge-tasks.spec.ts`, `tests/edge-runtime.spec.ts`, `tests/edge-host.spec.ts` | The worker-environment registry and heartbeats, placement filters and wait reasons, router task dispatch and result announcement, the whole dispatch and relay through a running Runtime, and the edge protocol end to end: registration, job claims, results, path confinement, task execution and reconnect reconciliation |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
@@ -516,7 +524,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `event_log`, `inbox_ack`, `disposition` and `decision` rows; the `lease` and `lease_generation` rows, whose floor must outlive any one lease; the `effect_ledger` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one. Schemas 12 to 14 add the event log, acknowledgement, lease and effect-ledger tables when any supported database opens, without rewriting stored records.
+`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one. Schemas 12 to 15 add the event log, acknowledgement, lease, effect-ledger, environment and worker-job tables when any supported database opens, without rewriting stored records.
 
 ## Model-facing interfaces
 

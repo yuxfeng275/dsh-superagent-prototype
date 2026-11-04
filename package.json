@@ -7,6 +7,9 @@
   "description": "A proactive agent for one GitHub repository, as a DSH (DeepSeek Harness) bundle: it listens to GitHub and optionally Feishu, evaluates requests under a Policy, turns authorized ones into Tickets, and executes each in its own DSH Session.",
   "type": "module",
   "main": "lib/index.js",
+  "bin": {
+    "dsh-superagent-worker": "./lib/worker-host.js"
+  },
   "types": "lib/index.d.ts",
   "exports": {
     ".": {

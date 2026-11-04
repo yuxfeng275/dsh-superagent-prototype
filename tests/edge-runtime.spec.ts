@@ -1,0 +1,40 @@
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, expect, it, vi } from 'vitest'
+import { EdgeServer } from '../src/app/edge-server.ts'
+import { WorkerHost } from '../src/edge/worker-host.ts'
+import { startRuntime, type Host } from './fixtures/host.ts'
+
+let h: Host | undefined
+afterEach(async () => { await h?.stop(); h = undefined })
+
+it('dispatches a router task to an edge worker and relays its answer to the main Session', async () => {
+  h = await startRuntime()
+  const fake = join(h.directory, 'fake-dsh')
+  writeFileSync(fake, '#!/bin/sh\ncat >/dev/null\necho \'{"type":"session","session_id":"sess-1"}\'\necho \'{"type":"final","text":"remote answer"}\'\n', { mode: 0o755 })
+  const server = new EdgeServer({ environments: h.runtime.environments, jobs: h.runtime.edgeJobs, token: 'edge-token', pollTimeoutMs: 200 })
+  const port = await server.listen('127.0.0.1', 0)
+  const controller = new AbortController()
+  const worker = new WorkerHost({ url: `http://127.0.0.1:${port}`, token: 'edge-token', workRoot: join(mkdtempSync(join(tmpdir(), 'edge-worker-')), 'work'),
+    name: 'remote-mac', heartbeatMs: 100, dsh: { command: fake } })
+  const running = worker.start(controller.signal)
+  try {
+    await worker.ready
+    const dispatched = await h.runTool(h.runtime.masterId, 'orchestrator_worker', { task: 'run the remote check' })
+    expect(dispatched).toMatchObject({ dispatched: true, environment: { name: 'remote-mac' } })
+    await vi.waitFor(() => {
+      const relayed = h!.deliveries.mock.calls.map(([call]) => call as { sessionId: string; text: string })
+        .filter(call => call.sessionId === h!.runtime.masterId)
+        .flatMap(call => { try { return [JSON.parse(call.text) as Record<string, unknown>] } catch { return [] } })
+        .filter(item => item.kind === 'edge_task_result')
+      expect(relayed).toContainEqual(expect.objectContaining({ state: 'finished', exit_code: 0, output: 'remote answer', session_id: 'sess-1' }))
+    }, { timeout: 8_000, interval: 50 })
+    // The result is marked announced, so the next sweep does not repeat it.
+    const jobs = h.runtime.edgeJobs.list({ limit: 10 })
+    expect(jobs).toContainEqual(expect.objectContaining({ kind: 'task', state: 'finished', announcedAt: expect.any(String) }))
+  } finally {
+    worker.stop(); await running
+    await server.close()
+  }
+}, 20_000)

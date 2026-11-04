@@ -28,6 +28,11 @@ import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
+import { EdgeJobs } from './edge-jobs.ts'
+import { EdgeTasks } from './edge-tasks.ts'
+import { EdgeServer } from './edge-server.ts'
+import { Environments } from './environments.ts'
+import { Scheduler } from './scheduler.ts'
 import { EventLog } from './events.ts'
 import { EffectLedger } from './ledger.ts'
 import { Leases, type Lease } from './leases.ts'
@@ -66,6 +71,14 @@ export class Runtime extends Service implements SourceHost {
   readonly store: Store
   readonly events: EventLog
   readonly leases: Leases
+  /** Worker environments registered by edge hosts, the jobs they claim, and the router's placement decisions. */
+  readonly environments: Environments
+  readonly edgeJobs: EdgeJobs
+  readonly scheduler: Scheduler
+  /** Router-dispatched agent tasks on worker environments. */
+  readonly edgeTasks: EdgeTasks
+  private edgeServer?: EdgeServer
+  private edgeTaskTimer?: ReturnType<typeof setInterval>
   readonly ledger: EffectLedger
   readonly setup: Setup
   readonly prompts: Prompts
@@ -82,6 +95,7 @@ export class Runtime extends Service implements SourceHost {
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
+  private readonly edgeHealth = this.board.claim('edge', { state: 'paused', detail: 'Edge worker API is disabled' })
   readonly masterId: string
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
@@ -110,6 +124,10 @@ export class Runtime extends Service implements SourceHost {
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
       const events = this.events = new EventLog(store)
       this.leases = new Leases(store)
+      this.environments = new Environments(store)
+      this.edgeJobs = new EdgeJobs(store)
+      this.scheduler = new Scheduler(this.environments, this.edgeJobs)
+      this.edgeTasks = new EdgeTasks({ environments: this.environments, scheduler: this.scheduler, jobs: this.edgeJobs })
       const ledger = this.ledger = new EffectLedger(store)
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
@@ -180,7 +198,7 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => this.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
-        requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
+        requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(), edge: this.edgeTasks,
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
     } catch (error) {
@@ -255,11 +273,46 @@ export class Runtime extends Service implements SourceHost {
       this.executor.resume()
       this.passes.start()
       this.effects.start()
+      this.startEdgeTasks()
+      await this.startEdge()
       this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
     } catch (error) {
       // A start that fails gives the lease back, so the next attempt can take over immediately instead of waiting for expiry.
       this.dropLease()
       throw error
+    }
+  }
+  /** Relay each finished edge task to the main Session once; the interval survives a restart because the queue is durable. */
+  private startEdgeTasks(): void {
+    this.edgeTaskTimer = setInterval(() => {
+      if (this.closing()) return
+      try { this.relayEdgeTasks() } catch (error) { this.ctx.logger.warn('dsh-superagent could not relay an edge task: %s', String(error)) }
+    }, 2_000)
+  }
+  private relayEdgeTasks(): void {
+    this.edgeJobs.settle(new Date().toISOString())
+    for (const job of this.edgeTasks.unannounced()) {
+      const output = job.result?.output ?? ''
+      const text = JSON.stringify({ kind: 'edge_task_result', job_id: job.id, environment: job.environmentId, state: job.state,
+        ...(job.result ? { exit_code: job.result.exitCode } : {}),
+        ...(job.result?.sessionId ? { session_id: job.result.sessionId } : {}),
+        ...(job.result?.error ? { error: job.result.error } : {}),
+        ...(output ? { output: output.length > 20_000 ? `${output.slice(0, 20_000)}…` : output } : {}) })
+      this.sessions.relay(`edge-task:${job.id}`, text)
+      this.edgeTasks.announce(job.id, new Date().toISOString())
+    }
+  }
+  /** Start the edge worker API when configured; a failure is reported in health without stopping the instance. */
+  private async startEdge(): Promise<void> {
+    const { host, port, token } = this.machine.edge
+    if (port <= 0) return
+    const server = new EdgeServer({ environments: this.environments, jobs: this.edgeJobs, token })
+    try {
+      const bound = await server.listen(host, port)
+      this.edgeServer = server
+      this.edgeHealth.set({ state: 'ready', detail: `Edge worker API on ${host}:${bound}`, at: now() })
+    } catch (error) {
+      this.edgeHealth.set({ state: 'error', detail: `Edge worker API could not listen on ${host}:${port}: ${error instanceof Error ? error.message : String(error)}`, at: now() })
     }
   }
   /** Hands events a crash left unacknowledged to the Engine again, which ignores the Triggers it already stored. */
@@ -307,7 +360,8 @@ export class Runtime extends Service implements SourceHost {
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    return { store, environments: this.environments, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready,
+      sourceLinks,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
@@ -319,6 +373,9 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       this.assessor.stop()
+      if (this.edgeTaskTimer !== undefined) { clearInterval(this.edgeTaskTimer); this.edgeTaskTimer = undefined }
+      await this.edgeServer?.close()
+      this.edgeServer = undefined
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })

@@ -10,7 +10,7 @@ export const reference = <T>(value: T): Volatile<T> & { set(next: T): void } => 
 export const testMachine = (overrides: Partial<Machine> = {}): Machine => ({
   stateDir: '/tmp/dsh-superagent-test', instanceId: 'test-instance', replicaId: 'test-replica',
   promptMaxChars: reference(100000), admissionContextMaxPages: reference(10),
-  admissionContextTimeoutMs: reference(15000), ...overrides,
+  admissionContextTimeoutMs: reference(15000), edge: { host: '127.0.0.1', port: 0, token: '' }, ...overrides,
 })
 export const testDeployment = (overrides: Partial<Deployment> = {}): Deployment => ({
   ...testMachine(), repository: 'acme/widgets',

@@ -10,6 +10,7 @@ import { ticketCard } from '../cards.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
 import type { Sessions } from '../sessions.ts'
+import type { EdgeTasks } from '../edge-tasks.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
@@ -31,6 +32,8 @@ export interface MainToolsHost {
   sendReplies(): Promise<void>
   /** Runs an Engine command initiated by the main Session without emitting self-notifications. */
   quietly<T>(run: () => T): T
+  /** Dispatches an agent task to a registered worker environment. */
+  readonly edge: Pick<EdgeTasks, 'dispatch'>
 }
 /** Schedules an Engine pass to execute the recorded routing decision and formats the tool response. */
 function routed(host: MainToolsHost, result: { decision?: DecisionKind; reason: string; ticketId?: string | undefined }) {
@@ -243,6 +246,22 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       schema: z.object({ thread: z.string().describe('Thread key, for example github:123 or feishu:<chat>:<root message>') }).strict(),
       execute: async args => {
         return { removed: host.quietly(() => host.engine.unsubscribe(args.thread)), thread: args.thread }
+      },
+    }),
+    tool({
+      name: 'orchestrator_worker',
+      description: 'Dispatch one self-contained task to a registered worker environment, such as another computer or server; the worker runs a DSH agent there and its result arrives later as an edge_task_result message. Use it on an explicit human request to run work on another machine, not for ordinary local work.',
+      schema: z.object({
+        task: z.string().trim().min(1).max(100_000).describe('The complete task for the worker agent; it has no conversation history here.'),
+        environment_id: z.string().min(1).optional().describe('Run only on this environment; omit to let the scheduler choose.'),
+        cwd: z.string().trim().max(500).optional().describe('Workspace directory on the worker, relative to its work root; reuse it to continue a session.'),
+        session_id: z.string().max(200).optional().describe('Continue the DSH Session named in an earlier edge_task_result; pass the same cwd.'),
+      }).strict(),
+      execute: async args => {
+        const result = host.edge.dispatch({ task: args.task, ...(args.environment_id ? { environmentId: args.environment_id } : {}),
+          ...(args.cwd ? { cwd: args.cwd } : {}), ...(args.session_id ? { sessionId: args.session_id } : {}) }, new Date().toISOString())
+        if (result.kind === 'waiting') return { dispatched: false, reason: result.reason }
+        return { dispatched: true, job_id: result.jobId, environment: { id: result.environment.id, name: result.environment.name } }
       },
     }),
     tool({
