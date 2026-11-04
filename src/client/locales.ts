@@ -98,6 +98,7 @@ const TEXT = {
   executorWaitingSetup: ['执行器等待部署检查', 'Executor waiting for the deployment check'],
   // Header, search, and tabs
   panel: ['Superagent', 'Superagent'],
+  statusOpen: ['手机/桌面', 'Phone & desktop'],
   openMaster: ['打开主 Session', 'Open main Session'],
   pagesLabel: ['dsh-superagent 页面', 'dsh-superagent pages'],
   searchPlaceholder: ['搜索工单、线程、触发或链接', 'Search Tickets, Threads, Triggers or links'],

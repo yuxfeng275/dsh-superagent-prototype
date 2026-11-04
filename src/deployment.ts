@@ -22,6 +22,14 @@ const EdgeSettings = s.object({
   port: s.number().min(0).max(65535).step(1).default(0).description('Port of the edge worker API; 0 disables it.'),
   token: s.string().default('').description('Bearer token every worker host must present; required when port is non-zero.'),
 })
+/** The read-only status surface served under `/status` for desktop and phone browsers. */
+const StatusSettings = s.object({
+  enabled: s.boolean().default(false).description('Serve the read-only status app at /status for desktop and phone browsers.'),
+  publicUrl: s.string().default('').description('HTTPS origin phones reach this Host through, such as https://mac-mini.tailnet.ts.net. Empty keeps the surface local to this machine.'),
+  sessionTtlDays: s.number().min(1).max(90).step(1).default(30).description('Days a paired device keeps read-only access before pairing again.'),
+  pairCodeTtlSeconds: s.number().min(30).max(600).step(1).default(60).description('Seconds a one-time pairing code stays valid.'),
+  maxDevices: s.number().min(1).max(20).step(1).default(5).description('Paired devices allowed at once.'),
+})
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
@@ -34,9 +42,23 @@ export const Config = s.object({
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
   edge: EdgeSettings,
+  status: StatusSettings,
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface EdgeConfig { host: string; port: number; token: string }
+/** Read-only status surface settings, resolved from the status block of the plugin configuration. */
+export interface StatusSettings {
+  /** Serve the status app; off by default. */
+  enabled: boolean
+  /** HTTPS origin phone browsers reach the Host through; empty keeps the surface local to this machine. */
+  publicUrl: string
+  /** Days a paired device keeps read-only access before pairing again. */
+  sessionTtlDays: number
+  /** Seconds a one-time pairing code stays valid. */
+  pairCodeTtlSeconds: number
+  /** Paired devices allowed at once. */
+  maxDevices: number
+}
 export interface Machine {
   stateDir: string
   /** Stable identity of the logical instance; a hash of `stateDir` unless configured. */
@@ -48,11 +70,26 @@ export interface Machine {
   admissionContextTimeoutMs: Volatile<number>
   /** Edge worker API; port 0 keeps it off. */
   edge: EdgeConfig
+  /** Read-only status surface; disabled unless configured. */
+  status: StatusSettings
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
   feishu: 'on the Feishu Source', author: 'prompt text', repositoryPath: 'in the prepare command of the Execution settings',
   worktreeRoot: 'the ticket directory of the Execution settings', blockedCommands: 'in the Execution settings',
+}
+
+/** Resolve `status.publicUrl` to a bare HTTPS origin, or explain why it cannot be one. */
+function statusOf(configured: DeploymentConfig['status']): StatusSettings {
+  const status: StatusSettings = configured ?? { enabled: false, publicUrl: '', sessionTtlDays: 30, pairCodeTtlSeconds: 60, maxDevices: 5 }
+  if (!status.publicUrl) return { ...status, sessionTtlDays: Math.min(90, Math.max(1, status.sessionTtlDays ?? 30)) }
+  let url: URL
+  try { url = new URL(status.publicUrl) } catch {
+    throw new Error('dsh-superagent status.publicUrl must be an https origin such as https://mac-mini.tailnet.ts.net')
+  }
+  if (url.protocol !== 'https:' || url.pathname !== '/' || url.search || url.hash || url.username || url.password)
+    throw new Error('dsh-superagent status.publicUrl must be an https origin without a path, query, credentials or fragment')
+  return { ...status, publicUrl: url.origin, sessionTtlDays: Math.min(90, Math.max(1, status.sessionTtlDays ?? 30)) }
 }
 
 /** Read machine settings and reject unknown configuration keys (naming where deprecated keys moved). */
@@ -63,7 +100,8 @@ export function machineOf(config: DeploymentConfig): Machine {
   const edge = config.edge ?? { host: '127.0.0.1', port: 0, token: '' }
   if (edge.port > 0 && !edge.token) throw new Error('dsh-superagent edge.port needs an edge.token; worker hosts must authenticate')
   return { stateDir, instanceId: instanceId || key(stateDir), replicaId: replicaId || hostname(),
-    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, edge: { host: edge.host, port: edge.port, token: edge.token } }
+    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, edge: { host: edge.host, port: edge.port, token: edge.token },
+    status: statusOf(config.status) }
 }
 
 export const GithubAccountsSchema = z.object({

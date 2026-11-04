@@ -122,6 +122,14 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | `edge.host` | no | Address the edge worker API binds to. Defaults to `127.0.0.1`; use `0.0.0.0` to accept worker hosts on the network |
 | `edge.port` | no | Port of the edge worker API. Defaults to `0`, which keeps it off |
 | `edge.token` | when `edge.port` is set | Bearer token every worker host must present |
+| `status.enabled` | no | Serve the read-only `/status` app for a phone or a second desktop. Defaults to `false` |
+| `status.publicUrl` | no | The bare HTTPS origin a phone reaches this Host through, such as `https://mac-mini.tailnet.ts.net`. Empty keeps `/status` local to this machine |
+| `status.sessionTtlDays` | no | Days a paired device keeps read-only access. Defaults to 30, at most 90 |
+| `status.pairCodeTtlSeconds` | no | Seconds a one-time pairing code stays valid. Defaults to 60 |
+| `status.maxDevices` | no | Paired devices allowed at once. Defaults to 5 |
+
+The `status` block adds the read-only desktop/phone app served at `/status`, with one-time device pairing and a
+loopback-only setup page; `docs/010-desktop-mobile-status.md` covers pairing, TLS exposure and its limits.
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 

@@ -13,4 +13,8 @@ export default defineConfig([
   { entry: { client: 'src/client/index.tsx' }, outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, clean: false, plugins: [raw],
     deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'] },
     outputOptions: { entryFileNames: 'client.js', banner: 'window.__ModuleLoader__.load({ id: "dsh-superagent", factory: (require) => {', footer: 'return module.exports; } });', intro: 'var module = { exports: {} }; var exports = module.exports;' } },
+  // Standalone browser app of the read-only /status surface. The Host reads lib/status-app.js at request time and serves
+  // it as /status/app.js, so it stays out of the panel bundle and out of the Node entry.
+  { entry: { 'status-app': 'src/status/app.ts' }, outDir: 'lib', format: 'esm', platform: 'browser', target: 'es2022',
+    dts: false, clean: false, outputOptions: { entryFileNames: 'status-app.js' } },
 ])
