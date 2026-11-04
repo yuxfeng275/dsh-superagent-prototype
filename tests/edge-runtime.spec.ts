@@ -54,9 +54,15 @@ it('runs a ticket worker on the configured environment and reports its structure
   try {
     const environment = await worker.ready
     const settings = h.runtime.store.settings()
-    h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, environment: environment.id,
+    // The ticket names its environment at accept time; the instance setting stays empty.
+    h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor,
       prepare: 'mkdir -p "$DSH_SUPERAGENT_DIR" && printf prepared > "$DSH_SUPERAGENT_DIR/prepared.txt"' } })
-    const { ticket } = await h.acceptedTicket(feishu('9', '@bot fix the remote ticket'))
+    const trigger = feishu('9', '@bot fix the remote ticket')
+    h.runtime.receive(trigger)
+    await h.runtime.idle()
+    const routed = await h.route({ kind: 'accept', trigger_id: trigger.id, title: 'Remote ticket', worktree_name: 'remote-ticket',
+      acknowledgement: '收到，在边缘处理。', environment_id: environment.id })
+    const ticket = h.runtime.store.tickets.get((routed.ticket as { ticket_id: string }).ticket_id)!
     await vi.waitFor(() => {
       const current = h!.runtime.store.tickets.get(ticket.id)
       expect(current?.ended?.outcome).toBe('completed')
