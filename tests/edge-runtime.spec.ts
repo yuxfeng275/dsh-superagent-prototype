@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -47,13 +47,15 @@ it('runs a ticket worker on the configured environment and reports its structure
   const server = new EdgeServer({ environments: h.runtime.environments, jobs: h.runtime.edgeJobs, token: 'edge-token', pollTimeoutMs: 200 })
   const port = await server.listen('127.0.0.1', 0)
   const controller = new AbortController()
-  const worker = new WorkerHost({ url: `http://127.0.0.1:${port}`, token: 'edge-token', workRoot: join(mkdtempSync(join(tmpdir(), 'edge-ticket-')), 'work'),
+  const workRoot = join(mkdtempSync(join(tmpdir(), 'edge-ticket-')), 'work')
+  const worker = new WorkerHost({ url: `http://127.0.0.1:${port}`, token: 'edge-token', workRoot,
     name: 'remote-ticket', heartbeatMs: 100, dsh: { command: fake } })
   const running = worker.start(controller.signal)
   try {
     const environment = await worker.ready
     const settings = h.runtime.store.settings()
-    h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, environment: environment.id } })
+    h.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, environment: environment.id,
+      prepare: 'mkdir -p "$DSH_SUPERAGENT_DIR" && printf prepared > "$DSH_SUPERAGENT_DIR/prepared.txt"' } })
     const { ticket } = await h.acceptedTicket(feishu('9', '@bot fix the remote ticket'))
     await vi.waitFor(() => {
       const current = h!.runtime.store.tickets.get(ticket.id)
@@ -62,8 +64,11 @@ it('runs a ticket worker on the configured environment and reports its structure
     }, { timeout: 12_000, interval: 50 })
     // The worker ran on the environment, not in a local Executor Session.
     expect(h.agents.get(`worker-${ticket.id}`)).toBeUndefined()
-    expect(h.runtime.edgeJobs.list({ ticketId: ticket.id })).toContainEqual(expect.objectContaining({ kind: 'task', ticketId: ticket.id,
-      state: 'finished', announcedAt: expect.any(String) }))
+    const jobs = h.runtime.edgeJobs.list({ ticketId: ticket.id })
+    expect(jobs.map(job => job.kind).sort()).toEqual(['prepare', 'task'])
+    expect(jobs).toContainEqual(expect.objectContaining({ kind: 'task', ticketId: ticket.id, state: 'finished', announcedAt: expect.any(String) }))
+    // The configured prepare command ran on the worker before its agent turn.
+    expect(readFileSync(join(workRoot, 'tickets', ticket.execution!.name, 'prepared.txt'), 'utf8')).toBe('prepared')
   } finally {
     worker.stop(); await running
     await server.close()

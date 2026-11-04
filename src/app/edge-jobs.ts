@@ -201,7 +201,7 @@ export class EdgeJobs {
 
   /** Finished, failed or expired task jobs the runtime has not yet relayed to the main Session. */
   unannounced(): WorkerJob[] {
-    return this.store.db.prepare("SELECT value FROM worker_job WHERE state IN ('finished', 'failed', 'expired') AND value ->> '$.kind' = 'task' AND value ->> '$.announcedAt' IS NULL ORDER BY rowid")
+    return this.store.db.prepare("SELECT value FROM worker_job WHERE state IN ('finished', 'failed', 'expired') AND value ->> '$.announcedAt' IS NULL AND (value ->> '$.kind' = 'task' OR value ->> '$.ticketId' IS NOT NULL) ORDER BY rowid")
       .all().map(row => WorkerJobSchema.parse(JSON.parse(String(row.value))))
   }
 
