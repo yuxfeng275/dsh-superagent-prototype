@@ -163,7 +163,8 @@ export class Runtime extends Service implements SourceHost {
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+        repliedTo: trigger => repliedTo({ store, sources }, trigger), prompts,
+        edge: { jobs: this.edgeJobs, scheduler: this.scheduler } })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
@@ -292,6 +293,12 @@ export class Runtime extends Service implements SourceHost {
   private relayEdgeTasks(): void {
     this.edgeJobs.settle(new Date().toISOString())
     for (const job of this.edgeTasks.unannounced()) {
+      // A job carrying a ticket is that ticket's worker turn; the executor reports it instead of the main Session.
+      if (job.ticketId) {
+        try { this.executor.edgeFinished(job); this.edgeTasks.announce(job.id, new Date().toISOString()) }
+        catch (error) { this.ctx.logger.warn('dsh-superagent could not settle an edge ticket job: %s', String(error)) }
+        continue
+      }
       const output = job.result?.output ?? ''
       const text = JSON.stringify({ kind: 'edge_task_result', job_id: job.id, environment: job.environmentId, state: job.state,
         ...(job.result ? { exit_code: job.result.exitCode } : {}),
