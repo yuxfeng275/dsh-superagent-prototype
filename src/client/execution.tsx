@@ -100,6 +100,10 @@ export function ExecutionSettings() {
             <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
               onChange={event => edit({ maxWorkers: event.target.value })} />
           </Field>
+          <Field label={t('workerEnvironment')} hint={t('workerEnvironmentHint')}>
+            <Input className="dt-mono" value={value.environment} placeholder={t('workerEnvironmentEmpty')} spellCheck={false}
+              onChange={event => edit({ environment: event.target.value })} />
+          </Field>
         </div>
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>

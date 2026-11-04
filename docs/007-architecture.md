@@ -479,7 +479,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
-| `tests/environments.spec.ts`, `tests/scheduler.spec.ts`, `tests/edge-tasks.spec.ts`, `tests/edge-runtime.spec.ts`, `tests/edge-host.spec.ts` | The worker-environment registry and heartbeats, placement filters and wait reasons, router task dispatch and result announcement, the whole dispatch and relay through a running Runtime, and the edge protocol end to end: registration, job claims, results, path confinement, task execution and reconnect reconciliation |
+| `tests/environments.spec.ts`, `tests/scheduler.spec.ts`, `tests/edge-tasks.spec.ts`, `tests/edge-runtime.spec.ts`, `tests/edge-host.spec.ts` | The worker-environment registry and heartbeats, placement filters and wait reasons, router task dispatch and result announcement, a Ticket's worker running and reporting on an environment through a running Runtime, and the edge protocol end to end: registration, job claims, results, path confinement, task execution and reconnect reconciliation |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 

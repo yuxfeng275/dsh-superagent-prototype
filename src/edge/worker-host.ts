@@ -6,7 +6,8 @@ import type { WorkerJob } from '../app/edge-jobs.ts'
 import type { WorkerEnvironment } from '../app/environments.ts'
 
 /** How a host runs one claimed job; the default runs its command or its agent task in the job's workspace. */
-export type JobExecutor = (job: WorkerJob, signal: AbortSignal) => Promise<{ exitCode: number; output: string; error?: string; sessionId?: string }>
+export type JobExecutor = (job: WorkerJob, signal: AbortSignal) => Promise<{ exitCode: number; output: string; error?: string; sessionId?: string;
+  report?: unknown }>
 /** How a host reaches DSH for a task job. */
 export interface DshOptions { command?: string; profile?: string; home?: string }
 export interface WorkerHostOptions {
@@ -197,6 +198,10 @@ export class WorkerHost {
   }
 }
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error)
+/** Read the structured report a task wrote to `.dsh-report.json`, if it exists and parses. */
+async function readingReport(cwd: string): Promise<unknown> {
+  try { return JSON.parse(await readFile(join(cwd, '.dsh-report.json'), 'utf8')) as unknown } catch { return undefined }
+}
 
 /** Resolve a job's directory under `workRoot`, refusing an absolute path outside it. Exported for tests. */
 export async function jobDirectory(job: WorkerJob, workRoot: string): Promise<string> {
@@ -207,11 +212,13 @@ export async function jobDirectory(job: WorkerJob, workRoot: string): Promise<st
   return directory
 }
 /** Default job runner: create the directory, then run the job's command or its agent task there. */
-export async function runJob(job: WorkerJob, workRoot: string, signal: AbortSignal, dsh?: DshOptions): Promise<{ exitCode: number; output: string; error?: string; sessionId?: string }> {
+export async function runJob(job: WorkerJob, workRoot: string, signal: AbortSignal, dsh?: DshOptions): Promise<{ exitCode: number; output: string; error?: string; sessionId?: string;
+  report?: unknown }> {
   const directory = await jobDirectory(job, workRoot)
   if (job.kind === 'task') {
     if (!job.payload.task?.trim()) throw new Error('The task job carries no task')
-    return runDshTask(job.payload.task, directory, job.payload.sessionId, dsh, signal)
+    // The job's variables reach the agent; its workspace is where the host put it, not the router's local path.
+    return runDshTask(job.payload.task, directory, job.payload.sessionId, dsh, signal, { ...job.payload.env, DSH_SUPERAGENT_DIR: directory })
   }
   if (!job.payload.command.trim()) return { exitCode: 0, output: '' }
   return runShell(job.payload.command, directory, job.payload.env, signal)
@@ -222,9 +229,9 @@ export async function runJob(job: WorkerJob, workRoot: string, signal: AbortSign
  * follow-up job continues the same Session by id. The host's DSH home is under the work root, never the operator's.
  */
 export async function runDshTask(task: string, cwd: string, sessionId: string | undefined, dsh: DshOptions | undefined,
-  signal: AbortSignal): Promise<{ exitCode: number; output: string; error?: string; sessionId?: string }> {
+  signal: AbortSignal, variables: Record<string, string> = {}): Promise<{ exitCode: number; output: string; error?: string; sessionId?: string; report?: unknown }> {
   const args = ['--profile', dsh?.profile ?? 'headless', '--json', ...(sessionId ? ['--session-id', sessionId] : [])]
-  const env = { ...process.env, DSH_HOME: dsh?.home ?? join(cwd, '.dsh') }
+  const env = { ...process.env, ...variables, DSH_HOME: dsh?.home ?? join(cwd, '.dsh') }
   return new Promise((resolvePromise, reject) => {
     const child = spawn(dsh?.command ?? 'dsh', args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
     let final = '', foundSession = sessionId, failure = '', stderr = '', buffer = ''
@@ -252,8 +259,9 @@ export async function runDshTask(task: string, cwd: string, sessionId: string | 
       clearTimeout(timer); signal.removeEventListener('abort', abort)
       if (buffer) event(buffer)
       const error = failure || (code ? stderr.trim() || `dsh exited with ${code}` : '')
-      resolvePromise({ exitCode: code ?? -1, output: final, ...(foundSession ? { sessionId: foundSession } : {}),
-        ...(error ? { error: error.slice(0, 2_000) } : {}) })
+      // A remote worker records its structured report beside its work; a missing or unreadable file is not a run failure.
+      void readingReport(cwd).then(report => resolvePromise({ exitCode: code ?? -1, output: final, ...(foundSession ? { sessionId: foundSession } : {}),
+        ...(report === undefined ? {} : { report }), ...(error ? { error: error.slice(0, 2_000) } : {}) }))
     })
   })
 }

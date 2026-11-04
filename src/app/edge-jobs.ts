@@ -21,7 +21,8 @@ export type JobPayload = z.infer<typeof JobPayloadSchema>
 export type JobPayloadInput = z.input<typeof JobPayloadSchema>
 /** The host's account of a finished job. */
 export const JobResultSchema = z.object({ exitCode: z.number().int(), output: z.string().max(100_000), error: z.string().max(2_000).nullish(),
-  sessionId: z.string().max(200).nullish() }).strict()
+  sessionId: z.string().max(200).nullish(), /** A worker report a task wrote to `.dsh-report.json`, if any. */
+  report: z.unknown().optional() }).strict()
 export type JobResult = z.infer<typeof JobResultSchema>
 export const JobStateSchema = z.enum(['queued', 'offered', 'started', 'finished', 'failed', 'expired', 'lost'])
 /** A job prepares a workspace (`prepare`) or runs one router-dispatched agent task (`task`). */

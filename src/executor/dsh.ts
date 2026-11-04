@@ -5,11 +5,14 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
-import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
+import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger, WorkerReport }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
+import type { EdgeJobs, WorkerJob } from '../app/edge-jobs.ts'
+import type { Prompts } from '../app/prompts.ts'
+import type { Scheduler } from '../app/scheduler.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
@@ -79,6 +82,19 @@ export interface ExecutorHost {
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
+  /** The prompts a remote worker is instructed with, and the queue and scheduler its turns use. */
+  readonly prompts: Pick<Prompts, 'current' | 'compose'>
+  readonly edge: { jobs: Pick<EdgeJobs, 'enqueue'>; scheduler: Pick<Scheduler, 'place'> }
+}
+/** The structured report a remote worker wrote, when its file held a valid one. */
+const REPORT_STATES = ['ready', 'waiting', 'blocked', 'failed', 'dropped', 'progress'] as const
+function remoteReport(job: WorkerJob): WorkerReport | undefined {
+  const value = job.result?.report
+  if (!value || typeof value !== 'object') return undefined
+  const report = value as { state?: unknown; summary?: unknown; human_action?: unknown }
+  if (typeof report.summary !== 'string' || !REPORT_STATES.includes(report.state as typeof REPORT_STATES[number])) return undefined
+  return { state: report.state as typeof REPORT_STATES[number], summary: report.summary,
+    ...(typeof report.human_action === 'string' ? { question: report.human_action } : {}) }
 }
 /** Looks up a ticket's origin trigger in Store. */
 export const sourceTrigger = (host: { store: Pick<Store, 'triggers'> }, ticket: Ticket): Trigger | undefined =>
@@ -224,6 +240,11 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** Edge jobs running a ticket's worker, by ticket, and the DSH Session each remote worker continues. */
+  private readonly remote = new Map<string, string>()
+  private readonly remoteSessions = new Map<string, string>()
+  /** The Inputs a remote worker took into its running turn, marked read when it reports. */
+  private readonly remoteInputs = new Map<string, string[]>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -293,6 +314,8 @@ export class DshExecutor implements Executor {
     const first = this.host.store.tickets.get(ticketId)
     const target = first && liveTicket(first) ? runningAssignment(first) : undefined
     if (!first || !target || !first.undelivered.length) return
+    // A remote worker cannot be steered mid-turn: its next turn starts once the running job reports.
+    if (this.host.store.settings().executor.environment.trim()) { await this.deliverRemote(first, target); return }
     let woken = false
     try {
       for (;;) {
@@ -356,6 +379,7 @@ export class DshExecutor implements Executor {
    */
   stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     this.transient.delete(assignment.id); this.transient.delete(`launch:${assignment.id}`)
+    this.remote.delete(ticket.id)
     const report = assignment.report
     const busy = !!assignment.deliveredAt && !!report && assignment.deliveredAt >= report.at
     const ownTurn = (report?.state === 'ready' || report?.state === 'dropped') && !busy
@@ -405,6 +429,7 @@ export class DshExecutor implements Executor {
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
   private running(ticket: Ticket): boolean {
     if (!runningAssignment(ticket)) return false
+    if (this.remote.has(ticket.id)) return true
     return this.host.context.agents.get(workerSessionId(ticket.id) as SessionId)?.status === 'running' || this.settling.has(ticket.id)
   }
   /** Marks a ticket failed after its launch fails; the ticket waits until new human input or an explicit retry arrives. */
@@ -421,6 +446,81 @@ export class DshExecutor implements Executor {
     })
   }
   private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
+  /** Start a ticket's worker on the configured environment as one edge task, with the worker prompt and its workspace. */
+  private async edgeLaunch(ticket: Ticket, assignment: Assignment, environmentId: string): Promise<void> {
+    const current = () => {
+      if (this.host.closing()) throw new Error('dsh-superagent is stopping')
+      if (this.host.paused()) throw new Later('Processing is paused')
+      const stored = this.host.store.tickets.get(ticket.id)
+      return !!stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
+    }
+    if (!current()) return
+    const placement = this.host.edge.scheduler.place({ environmentId }, now())
+    if (placement.kind === 'wait') throw new Later(`The worker environment is not available: ${placement.reason}`)
+    const directory = `tickets/${ticket.execution?.name ?? ticket.id}`
+    const variables = this.host.environment(ticket).map(variable => variable.key === 'DSH_SUPERAGENT_DIR' ? { ...variable, value: directory } : variable)
+    const prompt = this.host.prompts.compose(this.host.prompts.current().config, 'worker', variables)
+    const source = sourceTrigger(this.host, ticket)
+    const card = source ? await this.triggerCard(ticket, source.id) : undefined
+    if (!current()) return
+    const prepare = this.host.store.settings().executor.prepare.trim()
+    const task = [
+      '[dsh-superagent remote worker] You run this ticket\'s worker on a worker machine. The orchestrator tools are unavailable here: use the local tools, do the work, and when the turn ends write .dsh-report.json in this workspace with '
+        + '{"state":"ready|waiting|blocked|failed|dropped|progress","summary":"...","human_action":"...","pr_number":123} (human_action and pr_number optional).',
+      `Ticket ${ticket.id}: ${ticket.title}`,
+      `Workspace: ${directory} under the worker host\'s work root; everything you change stays there.`,
+      ...(prepare ? [`Prepare the checkout first if it is missing by running:\n${prepare}`] : []),
+      prompt,
+      mandateInstructions(ticket.mandate),
+      JSON.stringify({ ticket_id: ticket.id, title: ticket.title, assignment: ticket.execution?.assignment ?? '', ...(card ? { trigger: card } : {}) }),
+    ].join('\n\n')
+    const job = this.host.edge.jobs.enqueue({ kind: 'task', environmentId, ticketId: ticket.id, assignmentId: assignment.id,
+      payload: { cwd: directory, task, env: Object.fromEntries(variables.map(variable => [variable.key, variable.value])) } }, now())
+    this.remote.set(ticket.id, job.id)
+    this.host.engine.assignmentStarted(ticket.id, assignment.id)
+  }
+
+  /** Report a finished ticket job to the Engine: the worker's structured report, or a failure or waiting report from its output. */
+  edgeFinished(job: WorkerJob): void {
+    const ticketId = job.ticketId
+    if (!ticketId) return
+    this.remote.delete(ticketId)
+    if (job.result?.sessionId) this.remoteSessions.set(ticketId, job.result.sessionId)
+    const ticket = this.host.store.tickets.get(ticketId)
+    const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
+    if (!ticket || !assignment || assignment.id !== job.assignmentId) return
+    const report = remoteReport(job) ?? (job.state === 'finished' && job.result?.exitCode === 0
+      ? { state: 'waiting' as const, summary: (job.result.output || 'The remote worker ended without a report').slice(0, 2_000) }
+      : { state: 'failed' as const, summary: (job.result?.error || `The remote worker ${job.state}`).slice(0, 2_000) })
+    this.host.store.atomic(() => {
+      const updated = this.host.engine.report(ticketId, report)
+      this.relay(resultRelay(updated, report.state, report.summary))
+      const read = this.remoteInputs.get(ticketId)
+      this.remoteInputs.delete(ticketId)
+      if (read?.length) this.host.engine.inputsRead(ticketId, read)
+    })
+  }
+
+  /** Deliver the next pending Input to a remote worker by starting another edge task; one turn runs at a time. */
+  private async deliverRemote(ticket: Ticket, assignment: Assignment): Promise<void> {
+    if (this.remote.has(ticket.id)) throw new Later('The remote worker is still running')
+    const inputId = ticket.undelivered[0]
+    const input = ticket.inputs.find(item => item.id === inputId)
+    if (inputId === undefined || !input) return
+    const trigger = input.kind === 'trigger' ? await this.triggerCard(ticket, input.triggerId, input.note) : undefined
+    const message = inputMessage(input, trigger)
+    if (message === undefined) { this.host.engine.inputsDelivered(ticket.id, assignment.id, [inputId]); return }
+    const sessionId = this.remoteSessions.get(ticket.id)
+    const directory = `tickets/${ticket.execution?.name ?? ticket.id}`
+    const task = ['[dsh-superagent remote worker] Continue this ticket\'s work on the worker machine.', message,
+      'When the turn ends write .dsh-report.json with {"state":"ready|waiting|blocked|failed|dropped|progress","summary":"...","human_action":"..."}.'].join('\n\n')
+    const job = this.host.edge.jobs.enqueue({ kind: 'task', environmentId: this.host.store.settings().executor.environment.trim(), ticketId: ticket.id,
+      assignmentId: assignment.id, payload: { cwd: directory, task, ...(sessionId ? { sessionId } : {}) } }, now())
+    this.remote.set(ticket.id, job.id)
+    this.remoteInputs.set(ticket.id, [...this.remoteInputs.get(ticket.id) ?? [], inputId])
+    this.host.engine.inputsDelivered(ticket.id, assignment.id, [inputId])
+  }
+
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')
@@ -431,6 +531,9 @@ export class DshExecutor implements Executor {
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
+    // A configured worker environment runs this Ticket's worker there instead of in a local DSH Session.
+    const environment = this.host.store.settings().executor.environment.trim()
+    if (environment) { await this.edgeLaunch(ticket, assignment, environment); return }
     // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
     if (!await stat(workspace).then(() => true, () => false)) {
       await this.prepareDirectory(ticket)
