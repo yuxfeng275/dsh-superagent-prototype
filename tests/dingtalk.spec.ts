@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Engine, key, type Assessor, type Executor, type OutboundMessage, type Thread, type Trigger } from '../src/core/index.ts'
@@ -9,25 +9,20 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
-import { forgetDingtalkTokens, sendDingtalk } from '../src/sources/dingtalk-channel.ts'
+import { dingtalkCredentials, forgetDingtalkTokens, sendDingtalk } from '../src/sources/dingtalk-channel.ts'
 import { handleDingtalkFrame, openDingtalkStream, ROBOT_TOPIC, type StreamFrame } from '../src/sources/dingtalk-stream.ts'
 import { dingtalkKind, watchDingtalk } from '../src/sources/dingtalk.ts'
 import { dingtalkMessage, dingtalkTrigger } from '../src/sources/dingtalk-trigger.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
 const credentials = { clientId: 'ding-client', clientSecret: 'ding-secret', robotCode: 'ding-robot' }
-function credentialsFile(overrides: Record<string, unknown> = {}): string {
-  const path = join(mkdtempSync(join(tmpdir(), 'dingtalk-credentials-')), 'robot.json')
-  writeFileSync(path, JSON.stringify({ ...credentials, ...overrides }))
-  return path
-}
 const payload = (overrides: Record<string, unknown> = {}) => ({ msgId: 'msg-1', conversationId: 'cid-group', conversationType: '2',
   msgtype: 'text', text: { content: ' 请把标题改短 ' }, senderStaffId: 'staff-1', senderNick: 'Zhang San', senderId: 'sender-1',
   robotCode: 'ding-robot', createAt: 1757376000000, sessionWebhook: 'https://oapi.dingtalk.com/robot/sendBySession?session=x', ...overrides })
-function host(config: Record<string, unknown> = {}) {
+function host(overrides: Record<string, unknown> = {}) {
   const store = new Store(join(mkdtempSync(join(tmpdir(), 'dingtalk-')), 'db.sqlite'))
   store.saveSettings(SettingsSchema.parse({ policy: { sources: { dingtalk: { allowed: [{ id: 'staff-1', name: 'Zhang San' }] } } },
-    eval: { mode: 'auto' }, sources: { dingtalk: { enabled: true, config: { credentials: credentialsFile(), ...config } } } }))
+    eval: { mode: 'auto' }, sources: { dingtalk: { enabled: true, config: { ...credentials, ...overrides } } } }))
   const board = new HealthBoard()
   const sources = new SourceRegistry(() => store.settings(), board)
   sources.register(dingtalkKind)
@@ -61,6 +56,11 @@ class FakeSocket {
 afterEach(() => { forgetDingtalkTokens(); vi.unstubAllGlobals(); vi.restoreAllMocks(); FakeSocket.instances = [] })
 
 describe('dingtalk source', () => {
+  it('validates the panel credential fields, naming what is missing', () => {
+    expect(dingtalkCredentials(credentials)).toMatchObject({ clientId: 'ding-client', robotCode: 'ding-robot' })
+    expect(() => dingtalkCredentials({ clientId: '', clientSecret: '', robotCode: '' })).toThrow('fill in Client ID, Client Secret')
+    expect(dingtalkCredentials({ clientId: 'ding-client', clientSecret: 'ding-secret', robotCode: '' })).not.toHaveProperty('robotCode')
+  })
   it('translates group mentions and direct messages into Triggers keyed by message id', () => {
     const group = dingtalkTrigger(dingtalkMessage(payload()))!
     expect(group).toMatchObject({ id: key('dingtalk', 'msg-1'), source: 'dingtalk', threads: [{ source: 'dingtalk', id: 'cid-group' }],
@@ -89,11 +89,17 @@ describe('dingtalk source', () => {
     expect(sent).toHaveLength(2)
   })
   it('opens the gateway, receives a frame on the socket and closes cleanly', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ endpoint: 'wss://example.test/stream', ticket: 'ticket-1' }),
-      { status: 200, headers: { 'content-type': 'application/json' } })))
+    const calls: { url: string; body: unknown }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), body: init?.body === undefined ? undefined : JSON.parse(String(init.body)) })
+      return new Response(JSON.stringify({ endpoint: 'wss://example.test/stream', ticket: 'ticket-1' }),
+        { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
     vi.stubGlobal('WebSocket', FakeSocket)
     const frames: StreamFrame[] = []
     const connection = await openDingtalkStream(credentials, { signal: new AbortController().signal, onFrame: frame => { frames.push(frame) } })
+    expect(calls[0]!.body).toMatchObject({ clientId: 'ding-client', clientSecret: 'ding-secret',
+      subscriptions: [{ type: 'CALLBACK', topic: ROBOT_TOPIC }] })
     const socket = FakeSocket.instances[0]!
     expect(socket.url).toBe('wss://example.test/stream?ticket=ticket-1')
     socket.emit('message', { data: JSON.stringify({ type: 'SYSTEM', headers: { topic: 'KEEPALIVE' } }) } as never)
@@ -117,27 +123,32 @@ describe('dingtalk source', () => {
     const h = host()
     const outbound = (address: Record<string, string>): OutboundMessage => ({ id: `r-${address.conversationId}`, kind: 'reply', text: 'Done',
       channel: { source: 'dingtalk', thread: `dingtalk:${address.conversationId}`, address } })
-    expect(await sendDingtalk({ commands: h.commands, config: { credentials: credentialsFile() } }, outbound({ conversationId: 'cid-group', conversationType: '2' })))
+    expect(await sendDingtalk({ commands: h.commands, config: credentials }, outbound({ conversationId: 'cid-group', conversationType: '2' })))
       .toEqual({ result: 'sent', externalId: 'query-1' })
     expect(posts[0]).toMatchObject({ url: 'https://api.dingtalk.com/v1.0/robot/groupMessages/send', token: 'token-1',
       body: { robotCode: 'ding-robot', openConversationId: 'cid-group', msgKey: 'sampleText', msgParam: JSON.stringify({ content: 'Done' }) } })
-    expect(await sendDingtalk({ commands: h.commands, config: { credentials: credentialsFile() } }, outbound({ conversationId: 'cid-p2p', conversationType: '1', staffId: 'staff-1' })))
+    expect(await sendDingtalk({ commands: h.commands, config: credentials }, outbound({ conversationId: 'cid-p2p', conversationType: '1', staffId: 'staff-1' })))
       .toEqual({ result: 'gone' })
     expect(posts[1]!.body).toMatchObject({ robotCode: 'ding-robot', userIds: ['staff-1'] })
   })
-  it('gates the group and direct scopes, and pauses until setup finishes', async () => {
+  it('gates the group and direct scopes, and pauses with the missing fields until configured', async () => {
     const h = host()
     const trigger = dingtalkTrigger(dingtalkMessage(payload()))!
-    expect(dingtalkKind.scope!({ meta: trigger.meta }, { credentials: '' })).toEqual({ listened: true, observed: false, row: 'group' })
     const thread = { key: 'dingtalk:cid-group', ref: { source: 'dingtalk', id: 'cid-group' }, createdAt: '', subscriptions: [],
       correlated: [], pending: [], meta: {} } as Thread
+    expect(dingtalkKind.scope!({ meta: trigger.meta }, { clientId: '', clientSecret: '', robotCode: '' })).toEqual({ listened: true, observed: false, row: 'group' })
     expect(settingsPolicy(h.store.settings(), h.sources).gate(trigger, thread, [])).toMatchObject({ admissible: true, strength: 'explicit' })
     expect(settingsPolicy(h.store.settings(), h.sources).gate({ ...trigger, actor: { source: 'dingtalk', id: 'guest' } }, thread, []))
       .toMatchObject({ admissible: false, reason: 'not_a_member' })
+    const empty = host({ clientId: '', clientSecret: '' })
     const controller = new AbortController()
-    const ctx = sourceContextOf({ store: h.store, engine: h.engine, outbox: { send: () => {} }, commands: h.commands, sources: h.sources,
-      deployment: testDeployment(), ready: Promise.resolve(), configured: () => false, receive: h.receive }, dingtalkKind)
-    await watchDingtalk(ctx, controller.signal)
+    const running = watchDingtalk(empty.ctx, controller.signal)
+    await vi.waitFor(() => expect(empty.board.all.dingtalk).toMatchObject({ state: 'paused' }), { timeout: 5000 })
+    expect(empty.board.all.dingtalk?.detail).toContain('fill in Client ID, Client Secret')
+    controller.abort(); await running
+    const deps: SourceContextDeps = { store: h.store, engine: h.engine, outbox: { send: () => {} }, commands: h.commands, sources: h.sources,
+      deployment: testDeployment(), ready: Promise.resolve(), configured: () => false, receive: h.receive }
+    await watchDingtalk(sourceContextOf(deps, dingtalkKind), new AbortController().signal)
     expect(h.board.all.dingtalk).toMatchObject({ state: 'paused', code: 'setupPending' })
   })
 })

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,29 +10,24 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
-import { forgetWecomTokens, sendWecom } from '../src/sources/wecom-channel.ts'
+import { forgetWecomTokens, sendWecom, wecomCredentials } from '../src/sources/wecom-channel.ts'
 import { encryptWecom, wecomSignature } from '../src/sources/wecom-crypto.ts'
 import { answerWecom, watchWecom, wecomKind } from '../src/sources/wecom.ts'
 import { wecomMessage, wecomTrigger } from '../src/sources/wecom-trigger.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
-const credentials = { corpId: 'ww123456', agentId: 1000002, secret: 'corp-secret', token: 'callbacktoken', encodingAESKey: 'a'.repeat(43) }
+const credentials = { corpId: 'ww123456', agentId: '1000002', secret: 'corp-secret', token: 'callbacktoken', encodingAESKey: 'a'.repeat(43) }
 const message = (content = '请帮我修一下文案') => `<xml><ToUserName><![CDATA[${credentials.corpId}]]></ToUserName>` +
   `<FromUserName><![CDATA[zhangsan]]></FromUserName><CreateTime>1757376000</CreateTime>` +
   `<MsgType><![CDATA[text]]></MsgType><Content><![CDATA[${content}]]></Content><MsgId>1234567890</MsgId>` +
-  `<AgentID>${credentials.agentId}</AgentID></xml>`
-function credentialsFile(overrides: Record<string, unknown> = {}): string {
-  const path = join(mkdtempSync(join(tmpdir(), 'wecom-credentials-')), 'app.json')
-  writeFileSync(path, JSON.stringify({ ...credentials, ...overrides }))
-  return path
-}
+  `<AgentID>1000002</AgentID></xml>`
 function callback(inner: string, options: { timestamp?: string; nonce?: string; path?: string; token?: string } = {}) {
   const timestamp = options.timestamp ?? '1757376000', nonce = options.nonce ?? 'nonce'
   const encrypt = encryptWecom(inner, credentials.encodingAESKey, credentials.corpId)
   const signature = wecomSignature(options.token ?? credentials.token, timestamp, nonce, encrypt)
   return { method: 'POST', url: `${options.path ?? '/wecom'}?msg_signature=${signature}&timestamp=${timestamp}&nonce=${nonce}`,
     body: `<xml><ToUserName><![CDATA[${credentials.corpId}]]></ToUserName><Encrypt><![CDATA[${encrypt}]]></Encrypt>` +
-      `<AgentID><![CDATA[${credentials.agentId}]]></AgentID></xml>` }
+      `<AgentID><![CDATA[1000002]]></AgentID></xml>` }
 }
 async function freePort(): Promise<number> {
   const server = createServer()
@@ -42,10 +37,10 @@ async function freePort(): Promise<number> {
   await new Promise<void>(resolve => server.close(() => resolve()))
   return port
 }
-function host(path = credentialsFile(), config: Record<string, unknown> = {}) {
+function host(overrides: Record<string, unknown> = {}) {
   const store = new Store(join(mkdtempSync(join(tmpdir(), 'wecom-')), 'db.sqlite'))
   store.saveSettings(SettingsSchema.parse({ policy: { sources: { wecom: { allowed: [{ id: 'zhangsan', name: 'Zhang San' }] } } },
-    eval: { mode: 'auto' }, sources: { wecom: { enabled: true, config: { credentials: path, host: '127.0.0.1', port: 8091, path: '/wecom', ...config } } } }))
+    eval: { mode: 'auto' }, sources: { wecom: { enabled: true, config: { ...credentials, host: '127.0.0.1', port: 8091, path: '/wecom', ...overrides } } } }))
   const board = new HealthBoard()
   const sources = new SourceRegistry(() => store.settings(), board)
   sources.register(wecomKind)
@@ -62,18 +57,23 @@ function host(path = credentialsFile(), config: Record<string, unknown> = {}) {
 afterEach(() => { forgetWecomTokens(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('wecom source', () => {
+  it('validates the panel credential fields, naming what is missing', () => {
+    expect(wecomCredentials(credentials)).toMatchObject({ corpId: credentials.corpId, agentId: 1000002 })
+    expect(() => wecomCredentials({ ...credentials, corpId: '', secret: '' })).toThrow('fill in CorpID, app Secret')
+    expect(() => wecomCredentials({ ...credentials, agentId: 'not-a-number' })).toThrow('AgentId must be a positive number')
+  })
   it('verifies a callback URL by returning the decrypted echo string', async () => {
     const h = host()
     const echo = encryptWecom('echo-123', credentials.encodingAESKey, credentials.corpId)
     const timestamp = '1757376000', nonce = 'n'
     const signature = wecomSignature(credentials.token, timestamp, nonce, echo)
-    const answer = await answerWecom(h.ctx, { credentials: credentialsFile(), host: '127.0.0.1', port: 8091, path: '/wecom' },
+    const answer = await answerWecom(h.ctx, { ...credentials, host: '127.0.0.1', port: 8091, path: '/wecom' },
       { method: 'GET', url: `/wecom?msg_signature=${signature}&timestamp=${timestamp}&nonce=${nonce}&echostr=${encodeURIComponent(echo)}` })
     expect(answer).toEqual({ status: 200, body: 'echo-123' })
   })
   it('takes in a signed text callback once, on the sender\'s conversation, as an explicit request', async () => {
     const h = host()
-    const config = { credentials: credentialsFile(), host: '127.0.0.1', port: 8091, path: '/wecom' }
+    const config = { ...credentials, host: '127.0.0.1', port: 8091, path: '/wecom' }
     const first = await answerWecom(h.ctx, config, callback(message()))
     expect(first).toEqual({ status: 200, body: 'success' })
     const trigger = h.receive.mock.calls[0]![0]
@@ -87,8 +87,8 @@ describe('wecom source', () => {
   })
   it('rejects a tampered signature and messages that are not requests', async () => {
     const h = host()
-    const config = { credentials: credentialsFile(), host: '127.0.0.1', port: 8091, path: '/wecom' }
-    const tampered = callback(message(), { token: 'wrong-token' })
+    const config = { ...credentials, host: '127.0.0.1', port: 8091, path: '/wecom' }
+    const tampered = callback(message(), { token: 'wrongtoken' })
     expect((await answerWecom(h.ctx, config, tampered)).status).toBe(403)
     expect(h.receive).not.toHaveBeenCalled()
     const image = `<xml><FromUserName><![CDATA[zhangsan]]></FromUserName><CreateTime>1757376000</CreateTime>` +
@@ -114,7 +114,6 @@ describe('wecom source', () => {
     expect(settingsPolicy(h.store.settings(), h.sources).gate(guest, thread, [])).toMatchObject({ admissible: false, reason: 'not_a_member' })
   })
   it('sends through the app API, records the platform message id, and treats a missing member as gone', async () => {
-    const path = credentialsFile()
     const answer = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
     const sent: { url: string; body: unknown }[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -124,14 +123,14 @@ describe('wecom source', () => {
     }))
     const outbound = (id: string): OutboundMessage => ({ id, kind: 'reply', text: 'Done, PR ready', channel: { source: 'wecom', thread: 'wecom:zhangsan',
       address: { userId: 'zhangsan', messageId: '1234567890', agentId: '1000002' } } })
-    const h = host(path)
-    expect(await sendWecom({ commands: h.commands, config: { credentials: path } }, outbound('r1'))).toEqual({ result: 'sent', externalId: 'm-1' })
+    const h = host()
+    expect(await sendWecom({ commands: h.commands, config: credentials }, outbound('r1'))).toEqual({ result: 'sent', externalId: 'm-1' })
     expect(sent[0]!.body).toMatchObject({ touser: 'zhangsan', msgtype: 'text', agentid: 1000002, text: { content: 'Done, PR ready' } })
-    expect(await sendWecom({ commands: h.commands, config: { credentials: path } }, outbound('r2'))).toEqual({ result: 'gone' })
+    expect(await sendWecom({ commands: h.commands, config: credentials }, outbound('r2'))).toEqual({ result: 'gone' })
   })
-  it('runs the callback server while the Source is on, then stops listening', async () => {
+  it('runs the callback server once configured, then stops listening', async () => {
     const port = await freePort()
-    const h = host(credentialsFile(), { port })
+    const h = host({ port })
     const controller = new AbortController()
     const running = watchWecom(h.ctx, controller.signal)
     await vi.waitFor(() => expect(h.board.all.wecom).toMatchObject({ state: 'ready' }), { timeout: 5000 })
@@ -143,26 +142,17 @@ describe('wecom source', () => {
     await running
     await expect(fetch(`http://127.0.0.1:${port}/wecom`, { method: 'POST' })).rejects.toThrow()
   })
-  it('pauses until setup finishes, and while its credentials cannot be read', async () => {
-    const h = host(credentialsFile(), { port: await freePort() })
-    const paused = async (configured: boolean, path = credentialsFile()) => {
-      const store = new Store(join(mkdtempSync(join(tmpdir(), 'wecom-paused-')), 'db.sqlite'))
-      store.saveSettings(SettingsSchema.parse({ sources: { wecom: { enabled: true, config: { credentials: path, host: '127.0.0.1',
-        port: await freePort(), path: '/wecom' } } } }))
-      const board = new HealthBoard()
-      const sources = new SourceRegistry(() => store.settings(), board)
-      sources.register(wecomKind)
-      const deps: SourceContextDeps = { store, engine: h.engine, outbox: { send: () => {} }, commands: h.commands, sources,
-        deployment: testDeployment(), ready: Promise.resolve(), configured: () => configured, receive: h.receive }
-      const ctx = sourceContextOf(deps, { kind: 'wecom', health: ['wecom'] })
-      const controller = new AbortController()
-      const running = watchWecom(ctx, controller.signal)
-      if (!configured) { await running; return board.all.wecom }
-      await vi.waitFor(() => expect(board.all.wecom).toMatchObject({ state: 'paused' }), { timeout: 5000 })
-      controller.abort(); await running
-      return board.all.wecom
-    }
-    expect(await paused(false)).toMatchObject({ state: 'paused', code: 'setupPending' })
-    expect(await paused(true, join(tmpdir(), 'missing-wecom-credentials.json'))).toMatchObject({ state: 'paused' })
+  it('pauses with the missing fields until the credential form is filled in, and until setup finishes', async () => {
+    const h = host({ corpId: '', agentId: '', secret: '', token: '', encodingAESKey: '', port: await freePort() })
+    const controller = new AbortController()
+    const running = watchWecom(h.ctx, controller.signal)
+    await vi.waitFor(() => expect(h.board.all.wecom).toMatchObject({ state: 'paused' }), { timeout: 5000 })
+    expect(h.board.all.wecom?.detail).toContain('fill in CorpID, AgentId, app Secret, callback Token, EncodingAESKey')
+    controller.abort(); await running
+    const deps: SourceContextDeps = { store: h.store, engine: h.engine, outbox: { send: () => {} }, commands: h.commands, sources: h.sources,
+      deployment: testDeployment(), ready: Promise.resolve(), configured: () => false, receive: h.receive }
+    const waiting = sourceContextOf(deps, wecomKind)
+    await watchWecom(waiting, new AbortController().signal)
+    expect(h.board.all.wecom).toMatchObject({ state: 'paused', code: 'setupPending' })
   })
 })

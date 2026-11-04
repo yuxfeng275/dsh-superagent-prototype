@@ -44,37 +44,20 @@ future work.
 
 ## Credentials and configuration
 
-Secrets stay out of the settings database, as they do for Feishu's `lark-cli`. A Source stores the path of a JSON file
-whose content is re-read on every callback or reconnect; changing the file needs no restart and no settings save.
+Both Sources are configured entirely in the panel. Credential fields are ordinary settings stored in the local settings
+database; secret fields render as password inputs, and the settings history records only that they changed, never their
+values. An empty field is allowed so a Source can be enabled before an operator has the credentials: the Source reports
+the missing fields as a paused health detail, then starts listening or connecting as soon as the saved form is complete.
 
-WeCom credentials file:
+WeCom fields: Corp ID, App AgentId, App Secret, callback Token and callback EncodingAESKey, plus the callback listener's
+`host`, `port` and `path` under Advanced (default `127.0.0.1:8091/wecom`). Each field's hint names the page in the WeCom
+admin console it comes from.
 
-```json
-{
-  "corpId": "wwxxxxxxxxxxxxxxxx",
-  "agentId": 1000002,
-  "secret": "the app secret",
-  "token": "the callback Token",
-  "encodingAESKey": "the 43-character EncodingAESKey"
-}
-```
+DingTalk fields: Client ID, Client Secret and RobotCode. RobotCode usually equals Client ID; leave it empty to use the
+Client ID.
 
-DingTalk credentials file:
-
-```json
-{
-  "clientId": "dingxxxxxxxxxxxxxxxx",
-  "clientSecret": "the app secret",
-  "robotCode": "dingxxxxxxxxxxxxxxxx"
-}
-```
-
-`robotCode` defaults to `clientId`. The file must be readable by the account running dsh-superagent. The settings page
-shows only its absolute path, so the panel and its history never display a secret.
-
-WeCom additionally listens on `host`, `port` and `path` (default `127.0.0.1:8091/wecom`). Keeping the loopback
-interface as the default leaves TLS and routing to a reverse proxy; the public URL configured in the WeCom console must
-forward to this path.
+WeCom additionally listens on `host`, `port` and `path`. Keeping the loopback interface as the default leaves TLS and
+routing to a reverse proxy; the public URL configured in the WeCom console must forward to this path.
 
 ## 企业微信 (WeCom)
 
@@ -142,7 +125,7 @@ the Policy, not in the DingTalk console.
   admission table, never from the text.
 - The WeCom signature is compared in constant time before any decryption, and the receive id must match the configured
   corp id.
-- Credentials are read from a file outside the settings database and never placed in a worker's environment variables.
+- Credential fields live in the local settings database, render masked, and are omitted from settings history; they are never placed in a worker's environment variables.
 - Neither Channel logs a message body, a token or a secret in an error.
 
 ## Deployment and real-machine verification
@@ -153,7 +136,7 @@ socket. They do not contact WeCom or DingTalk. A real installation still needs t
 1. Create the WeCom self-built app, enable "Receive Messages", set the callback URL to the reverse-proxied
    `https://<host>/wecom`, and copy the Token and EncodingAESKey. Add the host's egress IP to the trusted IP list.
 2. Create the DingTalk app and robot, enable Stream mode, and copy the client id, secret and robot code.
-3. Write both credentials files on the host, enable the two Sources in the panel, and save.
+3. Enable the two Sources in the panel and fill in their credential fields; save.
 4. Verify, in order: the WeCom URL check passes; a member's message starts a Ticket; a group member's `@robot` message
    starts a Ticket; a ticket reply arrives in the same conversation; restarting dsh-superagent reconnects the Stream
    without losing or duplicating a message.

@@ -1,21 +1,22 @@
 /** DingTalk (钉钉) Source kind, Stream loop and Cordis plugin entry; see docs/009-wecom-dingtalk-sources.md. */
 import type { Context } from '@deepseek-ai/cordis'
-import { statSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
 import { health, sourceContext, type SourceContext } from './host.ts'
 import type { SourceKind } from './kind.ts'
-import { dingtalkLink, loadDingtalkCredentials, sendDingtalk } from './dingtalk-channel.ts'
+import { dingtalkCredentials, dingtalkLink, sendDingtalk } from './dingtalk-channel.ts'
 import { handleDingtalkFrame, openDingtalkStream, type StreamConnection } from './dingtalk-stream.ts'
 import { SOURCE, dingtalkMessage, dingtalkTrigger } from './dingtalk-trigger.ts'
 
 export { SOURCE, dingtalkMessage, dingtalkTrigger, dingtalkTriggerId } from './dingtalk-trigger.ts'
-export { loadDingtalkCredentials, sendDingtalk, DingtalkCredentialsSchema } from './dingtalk-channel.ts'
+export { dingtalkCredentials, sendDingtalk } from './dingtalk-channel.ts'
 export { handleDingtalkFrame, openDingtalkStream, ROBOT_TOPIC } from './dingtalk-stream.ts'
 
 const DingtalkConfigSchema = z.object({
-  /** Absolute path of the robot credentials JSON file; see docs/009 for its shape. */
-  credentials: z.string().trim().max(1024).refine(value => !value || value.startsWith('/'), 'The credentials file must be an absolute path').default(''),
+  // Credentials are edited in the panel; formats are checked here, and emptiness is allowed until the Source is used.
+  clientId: z.string().trim().max(128).regex(/^[A-Za-z0-9_.-]*$/).default(''),
+  clientSecret: z.string().max(256).default(''),
+  robotCode: z.string().trim().max(128).regex(/^[A-Za-z0-9_.-]*$/).default(''),
 }).strict()
 export type DingtalkConfig = z.infer<typeof DingtalkConfigSchema>
 
@@ -30,9 +31,15 @@ export const dingtalkKind: SourceKind<DingtalkConfig> = {
     en: 'Receives messages sent to the robot in direct chats and group mentions over a Stream WebSocket, and replies as the robot without a public callback URL.' },
   schema: DingtalkConfigSchema,
   fields: [
-    { key: 'credentials', type: 'text', label: { zh: '凭据文件', en: 'Credentials file' },
-      hint: { zh: '机器人的 clientId、clientSecret 和可选的 robotCode 的 JSON 文件绝对路径。文件不会存进设置数据库；换文件内容后下一次重连即生效。',
-        en: 'Absolute path of a JSON file holding the robot\'s clientId, clientSecret and optional robotCode. It is not stored in the settings database; a changed file takes effect on the next reconnect.' } },
+    { key: 'clientId', type: 'text', pattern: '[A-Za-z0-9]*', label: { zh: '机器人 Client ID（AppKey）', en: 'Robot Client ID' },
+      hint: { zh: '钉钉开发者后台 → 你的应用 → 凭证与基础信息 → Client ID。',
+        en: 'DingTalk developer console → your app → Credentials → Client ID.' } },
+    { key: 'clientSecret', type: 'secret', label: { zh: '机器人 Client Secret', en: 'Robot Client Secret' },
+      hint: { zh: '同一页的 Client Secret；保存后只显示一次。',
+        en: 'The Client Secret on the same page; it is shown once.' } },
+    { key: 'robotCode', type: 'text', pattern: '[A-Za-z0-9]*', label: { zh: '机器人 RobotCode', en: 'RobotCode' },
+      hint: { zh: '机器人编码，通常与 Client ID 相同；留空时使用 Client ID。',
+        en: 'The robot code, usually the same as the Client ID; leave it empty to use the Client ID.' } },
   ],
   health: ['dingtalk'],
   scope: ({ meta }) => ({ listened: true, observed: false, row: String(meta.conversationType) === '2' ? 'group' : 'direct' }),
@@ -75,7 +82,7 @@ export async function watchDingtalk(ctx: SourceContext, signal: AbortSignal): Pr
       continue
     }
     let credentials
-    try { credentials = loadDingtalkCredentials(config.credentials) }
+    try { credentials = dingtalkCredentials(config) }
     catch (error) {
       ctx.report('dingtalk', { state: 'paused', detail: String(error) })
       await delay(15_000, undefined, { signal }).catch(() => {})
@@ -84,12 +91,10 @@ export async function watchDingtalk(ctx: SourceContext, signal: AbortSignal): Pr
     const running = new AbortController()
     const stop = (): void => running.abort()
     signal.addEventListener('abort', stop, { once: true })
-    // Disabling the Source, changing its credentials file, or editing that file closes the Stream so it reconnects.
-    const changed = (): number => { try { return statSync(config.credentials).mtimeMs } catch { return 0 } }
-    const stamp = changed()
+    // Disabling the Source or changing its credentials closes the Stream so a saved form takes effect at once.
     const check = setInterval(() => {
       const current = ctx.config<DingtalkConfig>(SOURCE)
-      if (!current || current.credentials !== config.credentials || changed() !== stamp) running.abort()
+      if (!current || JSON.stringify(current) !== JSON.stringify(config)) running.abort()
     }, 5000)
     // Frames can arrive between the socket opening and `openDingtalkStream` returning; hold their acknowledgements.
     let connection: StreamConnection | undefined

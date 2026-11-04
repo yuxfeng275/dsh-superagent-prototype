@@ -254,6 +254,10 @@ export function SourceField({ field, value, saved, fact, onChange, labels, refre
       <Input type="number" min={field.min} max={field.max} required value={String(value ?? '')}
         onChange={event => onChange(event.target.value === '' ? '' : Number(event.target.value))} />
     </Field>
+    case 'secret': return <Field label={label} hint={hint}>
+      <Input type="password" value={String(value ?? '')} pattern={field.pattern} spellCheck={false} autoComplete="new-password"
+        onChange={event => onChange(event.target.value)} />
+    </Field>
     case 'text': return <Field label={label} hint={hint} note={localized(t, fact)}>
       {field.choose && Object.keys(labels).length
         ? <select className="dt-select" value={String(value ?? '')} onChange={event => onChange(event.target.value)}>

@@ -1,28 +1,23 @@
 /** DingTalk (钉钉) Channel: the robot sends a text message to the member or group through the DingTalk open API. */
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 import type { OutboundMessage } from '../core/index.ts'
 import { HttpError, requestJson } from '../infra/http.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { ChannelLink, ChannelLinks, SendResult } from './kind.ts'
 
-/** The DingTalk robot credentials, kept in a local JSON file rather than in the settings database. */
-export const DingtalkCredentialsSchema = z.object({
-  clientId: z.string().trim().min(1).max(128),
-  clientSecret: z.string().min(1).max(256),
-  robotCode: z.string().trim().min(1).max(128).optional(),
-}).strict()
-export type DingtalkCredentials = z.infer<typeof DingtalkCredentialsSchema>
-/** Reads and validates the robot credentials named by the Source's `credentials` setting. */
-export function loadDingtalkCredentials(path: string): DingtalkCredentials {
-  if (!path) throw new Error('The DingTalk Source has no credentials file')
-  let value: unknown
-  try { value = JSON.parse(readFileSync(path, 'utf8')) }
-  catch (error) { throw new Error(`Cannot read the DingTalk credentials file ${path}: ${error instanceof Error ? error.message : String(error)}`) }
-  const parsed = DingtalkCredentialsSchema.safeParse(value)
-  if (!parsed.success) throw new Error(`The DingTalk credentials file ${path} is not valid: ${parsed.error.issues.map(issue => `${issue.path.join('.')} ${issue.message}`).join('; ')}`)
-  return parsed.data
+/** The credential fields the Source's settings form edits. */
+export interface DingtalkCredentialFields { clientId: string; clientSecret: string; robotCode: string }
+/** The validated robot credentials the DingTalk APIs take. */
+export interface DingtalkCredentials { clientId: string; clientSecret: string; robotCode?: string }
+/**
+ * Validates the robot credentials the operator entered, naming the missing fields so the panel can say what to fill.
+ * An empty field is allowed in the schema so the Source can be enabled before it is configured; using it is not.
+ */
+export function dingtalkCredentials(config: DingtalkCredentialFields): DingtalkCredentials {
+  const missing = [...config.clientId ? [] : ['Client ID'], ...config.clientSecret ? [] : ['Client Secret']]
+  if (missing.length) throw new Error(`The DingTalk Source is not configured yet; fill in ${missing.join(', ')}`)
+  return { clientId: config.clientId, clientSecret: config.clientSecret, ...config.robotCode ? { robotCode: config.robotCode } : {} }
 }
 
 const TOKEN_URL = 'https://api.dingtalk.com/v1.0/oauth2/accessToken'
@@ -56,9 +51,9 @@ export function forgetDingtalkTokens(): void { tokens.clear() }
  * Sends one text message to the conversation and reports the platform's send key for the effect ledger.
  * The open API, unlike the callback's session Webhook, keeps working after a ticket has run for a while.
  */
-export async function sendDingtalk(host: { commands: Commands; config: { credentials: string } }, message: OutboundMessage): Promise<SendResult> {
+export async function sendDingtalk(host: { commands: Commands; config: DingtalkCredentialFields }, message: OutboundMessage): Promise<SendResult> {
   const { conversationId, conversationType, staffId } = message.channel.address
-  const credentials = loadDingtalkCredentials(host.config.credentials)
+  const credentials = dingtalkCredentials(host.config)
   const group = conversationType === '2'
   if (!group && !staffId) throw new Error('Missing DingTalk reply target')
   let token = await accessToken(credentials)
