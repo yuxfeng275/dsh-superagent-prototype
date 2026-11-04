@@ -6,7 +6,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { OutboundMessage } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
-import { Outbox } from '../src/app/outbox.ts'
+import { EffectLedger } from '../src/app/ledger.ts'
+import { Outbox, replyEffect } from '../src/app/outbox.ts'
 import { Store } from '../src/app/store.ts'
 import type { SourceKind } from '../src/sources/kind.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
@@ -56,11 +57,31 @@ it('sends nothing once the instance is fenced, leaving the receipt pending for t
     const sent: OutboundMessage[] = []
     const sources = { instance: () => ({ enabled: true }), channelAllowed: () => true,
       send: vi.fn(async (message: OutboundMessage) => { sent.push(message); return 'sent' as const }) }
-    const outbox = new Outbox({ store, effects, sources, commands: {} as Commands, paused: () => false } as never)
+    const outbox = new Outbox({ store, effects, sources, commands: {} as Commands, ledger: new EffectLedger(store),
+      instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
     const message: OutboundMessage = { id: 'fenced', channel: { source: 'github', thread: 'github:8', address: { number: '8' } }, text: 'Done', kind: 'notice' }
     outbox.send(message)
     store.fence()
     await expect(handlers.get('reply')!({}, 'fenced')).rejects.toThrow('The instance lease was lost')
     expect([sent.length, store.receipts.get('fenced')?.status]).toEqual([0, 'pending'])
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }) }
+})
+
+it('records each message in the effect ledger and marks it sent once the platform accepted it', async () => {
+  h.runtime.outbox.send({ id: 'ledgered', channel: feishu('1', 'x').channel!, text: '已合并。', kind: 'notice' })
+  await h.runtime.pump(); await h.runtime.sendReplies()
+  expect(h.runtime.ledger.get(replyEffect('ledgered'))).toMatchObject({ state: 'sent', kind: 'reply', instanceId: 'test-instance',
+    detail: { by: 'platform-idempotency' } })
+})
+
+it('settles a receipt the platform already accepted instead of sending the message again', async () => {
+  const lark = vi.mocked(Commands.prototype.lark)
+  await h.runtime.settings.pause(true, 'panel')
+  h.runtime.outbox.send({ id: 'accepted', channel: feishu('1', 'x').channel!, text: '已合并。', kind: 'notice' })
+  // The platform accepted the message and the ledger recorded it, but the process crashed before the receipt settled.
+  h.runtime.ledger.sent(replyEffect('accepted'), { by: 'platform-idempotency' })
+  lark.mockClear()
+  await h.runtime.settings.pause(false, 'panel')
+  await h.runtime.pump(); await h.runtime.sendReplies()
+  expect([h.runtime.outbox.status('accepted'), lark.mock.calls.length]).toEqual(['sent', 0])
 })

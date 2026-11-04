@@ -29,6 +29,7 @@ import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
 import { EventLog } from './events.ts'
+import { EffectLedger } from './ledger.ts'
 import { Leases, type Lease } from './leases.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
@@ -65,6 +66,7 @@ export class Runtime extends Service implements SourceHost {
   readonly store: Store
   readonly events: EventLog
   readonly leases: Leases
+  readonly ledger: EffectLedger
   readonly setup: Setup
   readonly prompts: Prompts
   readonly effects: Effects
@@ -108,6 +110,7 @@ export class Runtime extends Service implements SourceHost {
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
       const events = this.events = new EventLog(store)
       this.leases = new Leases(store)
+      const ledger = this.ledger = new EffectLedger(store)
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -146,7 +149,8 @@ export class Runtime extends Service implements SourceHost {
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
-      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, ledger, instanceId: machine.instanceId,
+        epoch: () => this.instanceLease?.epoch ?? 0, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
