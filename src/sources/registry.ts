@@ -95,7 +95,10 @@ export class SourceRegistry implements SourceScope {
   async send(message: OutboundMessage, commands: Commands): Promise<SendResult | 'waiting'> {
     const kind = this.kinds.get(message.channel.source)
     if (!kind) return 'waiting'
-    return kind.channel ? kind.channel.send({ commands }, message) : { result: 'gone' }
+    if (!kind.channel) return { result: 'gone' }
+    // The Channel also receives its Source's configuration, which names the credentials a direct API call needs.
+    const instance = this.resolve(kind, this.settings().sources[kind.kind])
+    return kind.channel.send({ commands, config: instance.config }, message)
   }
   link(channel: ChannelRef, links: ChannelLinks): ChannelLink {
     const link = this.kinds.get(channel.source)?.channel?.link(channel.address, links)

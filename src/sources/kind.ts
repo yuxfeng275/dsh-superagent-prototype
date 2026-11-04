@@ -4,7 +4,7 @@ import type { z } from 'zod'
 import type { OutboundMessage, ScopeResult, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
-import type { SourceContext, SourceHost } from './host.ts'
+import type { SourceHost } from './host.ts'
 
 export interface Localized { zh: string; en: string }
 /** `advanced` folds a rarely changed field (such as a polling tunable) behind the card's Advanced section. */
@@ -44,6 +44,8 @@ export interface ChannelLink { url: string; label: Localized; triggerId?: string
 export type ChannelLinks = Partial<Pick<Deployment, 'repository' | 'feishu'>>
 /** What a Channel reports after a send: the platform's own id when it gave one, so the effect ledger can name the message. */
 export type SendResult = { result: 'sent'; externalId?: string } | { result: 'gone' }
+/** What a Source's Channel is given: the deployment CLIs and the Source's own configuration (including its credentials file). */
+export interface ChannelHost<C> { commands: Commands; config: C }
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
@@ -52,7 +54,7 @@ export interface SourceChannel<C> {
    * Sends a message idempotently by ID; reports `gone` when the target conversation no longer accepts replies.
    * @throws when delivery failed but may succeed on a later retry.
    */
-  send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<SendResult>
+  send(host: ChannelHost<C>, message: OutboundMessage): Promise<SendResult>
   /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
 }

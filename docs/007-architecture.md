@@ -365,6 +365,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
+| `src/infra/http.ts` | `requestJson` and `HttpError`: bounded JSON calls for the Sources that talk to a platform API directly |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
@@ -374,6 +375,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What GitHub and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
+| `src/sources/wecom.ts` | The WeCom kind and plugin entry, exported as `./wecom-watch`: the callback server, request verification and intake |
+| `src/sources/wecom-trigger.ts` | WeCom messages as Triggers, and the conversation address a reply goes to |
+| `src/sources/wecom-crypto.ts` | The WeCom callback signature, envelope decryption and flat XML reads |
+| `src/sources/wecom-channel.ts` | The WeCom Channel: app messages through `cgi-bin/message/send`, `sent` or `gone` |
+| `src/sources/dingtalk.ts` | The DingTalk kind and plugin entry, exported as `./dingtalk-watch`: the Stream loop and its backoff |
+| `src/sources/dingtalk-stream.ts` | The DingTalk Stream connection: gateway open, WebSocket frames, acknowledgements |
+| `src/sources/dingtalk-trigger.ts` | DingTalk robot messages as Triggers, and the conversation address a reply goes to |
+| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: robot group and direct messages through the open API, `sent` or `gone` |
 | `src/sources/github.ts` | The GitHub kind and plugin entry, exported as `./github-watch`: a poll round of notifications, the pull requests of open Tickets with their CI, and subscribed Threads |
 | `src/sources/github-trigger.ts` | GitHub comments, reviews, Issue bodies and CI changes as Triggers, and GitHub addresses |
 | `src/sources/github-pull.ts` | The pull request rules: which pull requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and `pullEndNotices`, the chat notice of a Ticket that ended merged or closed |
@@ -409,7 +418,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts`, `src/sources/wecom.ts` and `src/sources/dingtalk.ts` are also the entries of the four Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch`, `./wecom-watch` and `./dingtalk-watch`. The bundle's `cordis.patch.yml` inserts all five plugins, with Feishu, WeCom and DingTalk disabled.
 
 ## Tests
 
@@ -422,6 +431,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
+| `tests/wecom.spec.ts` | The WeCom Source: callback verification and decryption, translation, admission, the app send API, and the callback server |
+| `tests/dingtalk.spec.ts` | The DingTalk Source: Stream frames and acknowledgements, translation, admission, the robot send API, and the gateway connection |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
