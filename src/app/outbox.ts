@@ -100,14 +100,14 @@ export class Outbox implements OutboxPort {
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const result = await sources.send(receipt, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')
-    if (result === 'gone') {
+    if (result.result === 'gone') {
       ledger.failed(key, { reason: 'channelGone' })
       store.receipts.settle(receipt, 'channelGone')
       return
     }
-    // The platform send is idempotent by its own key (the GitHub marker or the Feishu idempotency key), which is the
-    // reconciliation a retry relies on until the delivery plane reports the platform's own message ID.
-    ledger.sent(key, { by: 'platform-idempotency' })
+    // The platform send is idempotent by its own key (the GitHub marker or the Feishu idempotency key); the platform's own
+    // message ID, when it reports one, lets the ledger name the message a retry must not send again.
+    ledger.sent(key, { by: 'platform-idempotency' }, result.externalId)
     store.receipts.settle(receipt, 'sent')
   }
 }

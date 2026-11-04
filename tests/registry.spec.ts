@@ -43,7 +43,7 @@ describe('Source registry', () => {
     const sent: OutboundMessage[] = []
     const read: unknown[] = []
     sources.register({ ...probe,
-      channel: { send: async (_host, message) => { sent.push(message); return 'sent' },
+      channel: { send: async (_host, message) => { sent.push(message); return { result: 'sent' } },
         link: address => ({ url: `https://probe/${address.room}`, label: { zh: '探针', en: 'Probe' } }) },
       threadContext: { messageId: trigger => String(trigger.meta.id), read: async (_commands, trigger, part, cursor, config) => {
         read.push([trigger.id, part, cursor, config.interval])
@@ -53,7 +53,7 @@ describe('Source registry', () => {
     const commands = {} as Commands
     const message = (source: string): OutboundMessage => ({ id: 'r1', channel: { source, thread: 'probe:1', address: { room: 'r' } },
       text: 'hi', kind: 'reply' })
-    expect(await sources.send(message('probe'), commands)).toBe('sent')
+    expect(await sources.send(message('probe'), commands)).toEqual({ result: 'sent' })
     expect(sent).toEqual([message('probe')])
     // A kind that is not installed keeps its replies waiting; links to it have no page.
     expect(await sources.send(message('retired'), commands)).toBe('waiting')
@@ -70,7 +70,7 @@ describe('Source registry', () => {
       new AbortController().signal)).rejects.toThrow('no images')
     // A kind without a channel or a context has neither.
     sources.register({ ...probe, kind: 'quiet' })
-    expect(await sources.send(message('quiet'), commands)).toBe('gone')
+    expect(await sources.send(message('quiet'), commands)).toEqual({ result: 'gone' })
     expect(sources.threadContext({ ...trigger, source: 'quiet' })).toBeUndefined()
   })
   it('refuses a kind that declares a health entry another kind or dsh-superagent itself reports, and gives up its entries at unregister', () => {
@@ -156,7 +156,7 @@ describe('Source registry', () => {
     const commands = new Commands(() => testDeployment(), {}, new AbortController().signal)
     const run = vi.spyOn(commands, 'run').mockResolvedValue('{"ok":true,"data":{}}')
     const reply: OutboundMessage = { id: 'reply-1', channel, text: 'Done', kind: 'reply' }
-    expect(await sources.send(reply, commands)).toBe('sent')
+    expect(await sources.send(reply, commands)).toEqual({ result: 'sent' })
     expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['+messages-reply', '--message-id', 'om_dm']))
   })
 })

@@ -37,10 +37,10 @@ export class EffectLedger {
       .run(key, entry.instanceId, entry.kind, entry.target, entry.leaseEpoch, at, at))
   }
 
-  /** Records that the platform accepted the effect; `detail` says how a retry recognises it. */
-  sent(key: string, detail: Record<string, unknown> = {}): void {
-    this.store.atomic(() => this.store.db.prepare(`UPDATE effect_ledger SET state = 'sent', updated_at = ?, detail = ?
-      WHERE idempotency_key = ?`).run(this.now(), JSON.stringify(detail), key))
+  /** Records that the platform accepted the effect; `detail` says how a retry recognises it, and `externalId` is the platform's own ID when it reported one. */
+  sent(key: string, detail: Record<string, unknown> = {}, externalId?: string): void {
+    this.store.atomic(() => this.store.db.prepare(`UPDATE effect_ledger SET state = 'sent', external_id = COALESCE(?, external_id),
+      updated_at = ?, detail = ? WHERE idempotency_key = ?`).run(externalId ?? null, this.now(), JSON.stringify(detail), key))
   }
 
   /** Records that the platform will never accept the effect, such as a conversation that no longer exists. */

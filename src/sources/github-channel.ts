@@ -4,7 +4,7 @@ import type { OutboundMessage } from '../core/index.ts'
 import { CliError } from '../infra/commands.ts'
 import { sameName } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
-import type { ChannelLink, ChannelLinks } from './kind.ts'
+import type { ChannelLink, ChannelLinks, SendResult } from './kind.ts'
 import { githubAddress, githubPage } from './github-trigger.ts'
 
 const CommentSchema = z.looseObject({
@@ -15,7 +15,7 @@ const gone = (error: unknown): boolean => error instanceof CliError
   && (error.code === 410 || (error.code === 403 && /locked/i.test(error.message)))
 const missing = (error: unknown): boolean => error instanceof CliError && (error.code === 404 || error.code === 410)
 /** Posts a comment or review-thread reply with an embedded HTML marker so retries do not create duplicate comments. */
-export async function sendGithub(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
+export async function sendGithub(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<SendResult> {
   const { commands } = host
   const { repository, github } = commands.deployment
   const number = Number(message.channel.address.number)
@@ -34,12 +34,15 @@ export async function sendGithub(host: Pick<SourceContext, 'commands'>, message:
     const marker = `<!-- dsh-superagent:${message.id} -->`
     const mine = (comment: z.infer<typeof CommentSchema>) => sameName(comment.user?.login ?? '', github.login)
       && (rootId === undefined || comment.in_reply_to_id === rootId) && (comment.body ?? '').includes(marker)
-    if ((await commands.pages(CommentSchema, path)).some(mine)) return 'sent'
+    // A comment an earlier attempt posted carries the marker, so the retry reports that comment instead of posting again.
+    const found = (await commands.pages(CommentSchema, path)).find(mine)
+    if (found) return typeof found.id === 'number' ? { result: 'sent', externalId: String(found.id) } : { result: 'sent' }
     const target = rootId === undefined ? path : `${path}/${rootId}/replies`
-    await commands.api(z.unknown(), target, '--method', 'POST', '-f', `body=${message.text}\n\n${marker}`)
-    return 'sent'
+    const posted = await commands.api(z.unknown(), target, '--method', 'POST', '-f', `body=${message.text}\n\n${marker}`)
+    const externalId = posted && typeof posted === 'object' && 'id' in posted && typeof posted.id === 'number' ? String(posted.id) : undefined
+    return externalId ? { result: 'sent', externalId } : { result: 'sent' }
   } catch (error) {
-    if (gone(error)) return 'gone'
+    if (gone(error)) return { result: 'gone' }
     throw error
   }
 }
