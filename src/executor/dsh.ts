@@ -446,7 +446,7 @@ export class DshExecutor implements Executor {
     })
   }
   private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
-  /** Start a ticket's worker on the configured environment as one edge task, with the worker prompt and its workspace. */
+  /** Start a ticket's worker on the configured environment: prepare the remote workspace, then run one agent task. */
   private async edgeLaunch(ticket: Ticket, assignment: Assignment, environmentId: string): Promise<void> {
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')
@@ -457,25 +457,43 @@ export class DshExecutor implements Executor {
     if (!current()) return
     const placement = this.host.edge.scheduler.place({ environmentId }, now())
     if (placement.kind === 'wait') throw new Later(`The worker environment is not available: ${placement.reason}`)
-    const directory = `tickets/${ticket.execution?.name ?? ticket.id}`
+    const name = ticket.execution?.name ?? ticket.id
+    const directory = `tickets/${name}`
+    const prepare = this.host.store.settings().executor.prepare.trim()
+    if (!prepare) { await this.edgeTurn(ticket, assignment, environmentId, directory); return }
+    if (!current()) return
+    // The configured prepare command runs on the worker, in the parent directory, as it runs beside a local workspace.
+    const variables = this.host.environment(ticket).map(variable => variable.key === 'DSH_SUPERAGENT_DIR' ? { ...variable, value: name } : variable)
+    const job = this.host.edge.jobs.enqueue({ kind: 'prepare', environmentId, ticketId: ticket.id, assignmentId: assignment.id,
+      payload: { cwd: 'tickets', command: prepare, env: Object.fromEntries(variables.map(variable => [variable.key, variable.value])) } }, now())
+    this.remote.set(ticket.id, job.id)
+  }
+
+  /** Compose and dispatch the one agent task of a Ticket's remote worker turn. */
+  private async edgeTurn(ticket: Ticket, assignment: Assignment, environmentId: string, directory: string): Promise<void> {
+    const current = () => {
+      if (this.host.closing()) throw new Error('dsh-superagent is stopping')
+      if (this.host.paused()) throw new Later('Processing is paused')
+      const stored = this.host.store.tickets.get(ticket.id)
+      return !!stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
+    }
     const variables = this.host.environment(ticket).map(variable => variable.key === 'DSH_SUPERAGENT_DIR' ? { ...variable, value: directory } : variable)
     const prompt = this.host.prompts.compose(this.host.prompts.current().config, 'worker', variables)
     const source = sourceTrigger(this.host, ticket)
     const card = source ? await this.triggerCard(ticket, source.id) : undefined
     if (!current()) return
-    const prepare = this.host.store.settings().executor.prepare.trim()
     const task = [
       '[dsh-superagent remote worker] You run this ticket\'s worker on a worker machine. The orchestrator tools are unavailable here: use the local tools, do the work, and when the turn ends write .dsh-report.json in this workspace with '
         + '{"state":"ready|waiting|blocked|failed|dropped|progress","summary":"...","human_action":"...","pr_number":123} (human_action and pr_number optional).',
       `Ticket ${ticket.id}: ${ticket.title}`,
       `Workspace: ${directory} under the worker host\'s work root; everything you change stays there.`,
-      ...(prepare ? [`Prepare the checkout first if it is missing by running:\n${prepare}`] : []),
       prompt,
       mandateInstructions(ticket.mandate),
       JSON.stringify({ ticket_id: ticket.id, title: ticket.title, assignment: ticket.execution?.assignment ?? '', ...(card ? { trigger: card } : {}) }),
     ].join('\n\n')
+    const sessionId = this.remoteSessions.get(ticket.id)
     const job = this.host.edge.jobs.enqueue({ kind: 'task', environmentId, ticketId: ticket.id, assignmentId: assignment.id,
-      payload: { cwd: directory, task, env: Object.fromEntries(variables.map(variable => [variable.key, variable.value])) } }, now())
+      payload: { cwd: directory, task, ...(sessionId ? { sessionId } : {}), env: Object.fromEntries(variables.map(variable => [variable.key, variable.value])) } }, now())
     this.remote.set(ticket.id, job.id)
     this.host.engine.assignmentStarted(ticket.id, assignment.id)
   }
@@ -487,8 +505,19 @@ export class DshExecutor implements Executor {
     this.remote.delete(ticketId)
     if (job.result?.sessionId) this.remoteSessions.set(ticketId, job.result.sessionId)
     const ticket = this.host.store.tickets.get(ticketId)
-    const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
+    const assignment = ticket && liveTicket(ticket) ? latestAssignment(ticket) : undefined
     if (!ticket || !assignment || assignment.id !== job.assignmentId) return
+    // A prepare job precedes the worker turn; its success starts that turn and its failure fails the launch.
+    if (job.kind === 'prepare') {
+      if (job.state === 'finished' && job.result?.exitCode === 0) {
+        void this.edgeTurn(ticket, assignment, job.environmentId, `tickets/${ticket.execution?.name ?? ticket.id}`).catch((error: unknown) => {
+          this.failed(ticket.id, String(error))
+        })
+      } else {
+        this.failed(ticket.id, (job.result?.error || job.result?.output || `The remote workspace prepare ${job.state}`).slice(0, 2_000))
+      }
+      return
+    }
     const report = remoteReport(job) ?? (job.state === 'finished' && job.result?.exitCode === 0
       ? { state: 'waiting' as const, summary: (job.result.output || 'The remote worker ended without a report').slice(0, 2_000) }
       : { state: 'failed' as const, summary: (job.result?.error || `The remote worker ${job.state}`).slice(0, 2_000) })
