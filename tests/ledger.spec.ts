@@ -28,3 +28,16 @@ it('keeps one record per idempotency key and moves it from intent to sent or fai
   expect(ledger.get('reply:m1')).toMatchObject({ state: 'failed', detail: { reason: 'channelGone' } })
   expect(ledger.get('missing')).toBeUndefined()
 })
+
+it('counts the effects in each state for the ledger health entry', () => {
+  const ledger = new EffectLedger(store)
+  const entry = { instanceId: 'team-a', kind: 'reply', target: 'feishu:oc_1:om_1', leaseEpoch: 1 }
+  ledger.intent('reply:a', entry)
+  ledger.intent('reply:b', entry)
+  ledger.intent('reply:c', entry)
+  ledger.sent('reply:a')
+  ledger.failed('reply:c', { reason: 'channelGone' })
+  expect(ledger.summary()).toEqual({ intent: 1, sent: 1, confirmed: 0, failed: 1, reconciled: 0 })
+  ledger.confirm('reply:a')
+  expect(ledger.summary()).toEqual({ intent: 1, sent: 0, confirmed: 1, failed: 1, reconciled: 0 })
+})

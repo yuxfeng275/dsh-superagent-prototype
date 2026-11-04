@@ -20,6 +20,11 @@ async function at(ms: number) {
   try { await h.runtime.pump(); await h.runtime.sendReplies() } finally { vi.useRealTimers() }
 }
 
+it('reports the ledger counts and duplicate-send metric from the first start', () => {
+  expect(h.runtime.health.ledger).toMatchObject({ state: 'ready',
+    detail: '0 intent, 0 sent, 0 confirmed, 0 failed; 0 duplicate sends avoided' })
+})
+
 it('holds every message while processing is paused, and sends it once processing resumes', async () => {
   const lark = vi.mocked(Commands.prototype.lark)
   await h.runtime.settings.pause(true, 'panel')
@@ -58,7 +63,7 @@ it('sends nothing once the instance is fenced, leaving the receipt pending for t
     const sources = { instance: () => ({ enabled: true }), channelAllowed: () => true,
       send: vi.fn(async (message: OutboundMessage) => { sent.push(message); return 'sent' as const }) }
     const outbox = new Outbox({ store, effects, sources, commands: {} as Commands, ledger: new EffectLedger(store),
-      instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
+      ledgerHealth: { set: vi.fn() }, instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
     const message: OutboundMessage = { id: 'fenced', channel: { source: 'github', thread: 'github:8', address: { number: '8' } }, text: 'Done', kind: 'notice' }
     outbox.send(message)
     store.fence()
@@ -84,6 +89,8 @@ it('settles a receipt the platform already accepted instead of sending the messa
   await h.runtime.settings.pause(false, 'panel')
   await h.runtime.pump(); await h.runtime.sendReplies()
   expect([h.runtime.outbox.status('accepted'), lark.mock.calls.length]).toEqual(['sent', 0])
+  expect(h.runtime.outbox.avoided).toBe(1)
+  expect(h.runtime.health.ledger).toMatchObject({ state: 'ready', detail: expect.stringContaining('1 duplicate sends avoided') })
 })
 
 it('settles pending receipts the ledger already records as sent, before delivery starts', () => {
@@ -93,7 +100,7 @@ it('settles pending receipts the ledger already records as sent, before delivery
     const effects = { handle: vi.fn(), enqueue: vi.fn(), cancel: vi.fn(), idle: vi.fn(async () => {}) }
     const ledger = new EffectLedger(store)
     const outbox = new Outbox({ store, effects, sources: {} as never, commands: {} as never, ledger,
-      instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
+      ledgerHealth: { set: vi.fn() }, instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
     const message: OutboundMessage = { id: 'reconciled', channel: { source: 'github', thread: 'github:8', address: { number: '8' } }, text: 'Done', kind: 'notice' }
     outbox.send(message)
     // The platform accepted the message and the ledger recorded it, but the process crashed before the receipt settled.
@@ -101,8 +108,11 @@ it('settles pending receipts the ledger already records as sent, before delivery
     expect(outbox.reconcile()).toBe(1)
     expect([store.receipts.get(message.id)?.status, ledger.get(replyEffect(message.id))?.state]).toEqual(['sent', 'confirmed'])
     expect(effects.cancel).toHaveBeenCalledWith('reply', message.id)
+    // The settled receipt is a send the ledger avoided for this start.
+    expect(outbox.avoided).toBe(1)
     // Once settled, the next start has nothing left to reconcile.
     expect(outbox.reconcile()).toBe(0)
+    expect(outbox.avoided).toBe(1)
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }) }
 })
 
@@ -117,7 +127,7 @@ it('records the platform message id in the ledger when the channel reports one',
       send: vi.fn(async () => ({ result: 'sent' as const, externalId: '42' })) }
     const ledger = new EffectLedger(store)
     const outbox = new Outbox({ store, effects, sources, commands: {} as Commands, ledger,
-      instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
+      ledgerHealth: { set: vi.fn() }, instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
     const message: OutboundMessage = { id: 'external', channel: { source: 'github', thread: 'github:8', address: { number: '8' } }, text: 'Done', kind: 'notice' }
     outbox.send(message)
     await handlers.get('reply')!({}, message.id)
