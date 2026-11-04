@@ -25,6 +25,8 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
+- For WeCom: a self-built app with message receiving enabled, its callback URL, Token and EncodingAESKey, and a public HTTPS address that forwards to the host
+- For DingTalk: an app and a robot with Stream mode enabled
 
 ## Accounts
 
@@ -67,6 +69,48 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
+
+### WeCom app (optional)
+
+Create a self-built app in the WeCom admin console, enable **Receive Messages**, and choose a URL, a Token and an EncodingAESKey. The URL must be public HTTPS:
+
+```
+https://<your host>/wecom  →  reverse proxy  →  http://127.0.0.1:8091/wecom
+```
+
+Add the host's outbound IP to the app's trusted IP list, because sending messages through `cgi-bin/message/send` checks it. Then write the credentials file, readable only by the operator:
+
+```sh
+umask 077
+cat > ~/.config/dsh-superagent/wecom.json <<'JSON'
+{
+  "corpId": "ww…",
+  "agentId": 1000002,
+  "secret": "…",
+  "token": "…",
+  "encodingAESKey": "…"
+}
+JSON
+```
+
+Point the WeCom Source's **Credentials file** at that path, keep the default listen address behind the proxy, and enable the Source. The file is re-read on every callback, so rotating a secret needs no restart. Document 009 describes the callback and the limits.
+
+### DingTalk robot (optional)
+
+Create an app and a robot in the DingTalk developer console, enable Stream mode, and publish the robot. No public URL is needed. Write the credentials file:
+
+```sh
+umask 077
+cat > ~/.config/dsh-superagent/dingtalk.json <<'JSON'
+{
+  "clientId": "ding…",
+  "clientSecret": "…",
+  "robotCode": "ding…"
+}
+JSON
+```
+
+Point the DingTalk Source's **Credentials file** at that path and enable the Source. The robot must be enabled for the organisation and added to any group that should reach the agent. The file is re-read on the next reconnect.
 
 ## Install
 
@@ -219,7 +263,7 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source. WeCom and DingTalk are not part of setup: they read their credentials files at runtime and report a missing or unreadable file as a paused Source, so the rest of the application keeps running.
 
 The process environment that setup writes:
 
@@ -230,7 +274,7 @@ A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write s
 
 ## Try it
 
-From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat.
+From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat. For WeCom, message the self-built app; for DingTalk, message the robot directly or mention it in a group.
 
 ## Upgrade
 
