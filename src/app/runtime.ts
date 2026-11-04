@@ -242,6 +242,9 @@ export class Runtime extends Service implements SourceHost {
         this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
         return
       }
+      // A reply the platform accepted before a crash is settled from the effect ledger, so no source has to be reachable to avoid resending it.
+      const reconciled = this.outbox.reconcile()
+      if (reconciled) this.ctx.logger.info('dsh-superagent: settled %d outbound messages the effect ledger already recorded as sent', reconciled)
       this.sessions.install()
       this.executor.install()
       await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
