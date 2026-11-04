@@ -123,7 +123,8 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  return { name, directory: join(executionRoot(settings, stateDir), name), assignment,
+    ...(outcome.environmentId ? { environmentId: outcome.environmentId } : {}) }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -561,7 +562,7 @@ export class DshExecutor implements Executor {
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
     // A configured worker environment runs this Ticket's worker there instead of in a local DSH Session.
-    const environment = this.host.store.settings().executor.environment.trim()
+    const environment = ticket.execution?.environmentId?.trim() || this.host.store.settings().executor.environment.trim()
     if (environment) { await this.edgeLaunch(ticket, assignment, environment); return }
     // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
     if (!await stat(workspace).then(() => true, () => false)) {

@@ -489,3 +489,11 @@ it('gives a worker the other messages of the request its ticket was accepted fro
   expect(page).toMatchObject({ batch: [{ trigger_id: other, read: `trigger/${other}` }] })
   expect(await h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `trigger/${other}` })).toMatchObject({ trigger_id: other })
 })
+
+it('refuses an accept that names an unknown worker environment', async () => {
+  const trigger = feishu('88', '@bot do the thing')
+  h.runtime.receive(trigger)
+  await h.runtime.idle()
+  await expect(h.route({ kind: 'accept', trigger_id: trigger.id, title: 'Remote work', worktree_name: 'remote-work',
+    acknowledgement: 'On it.', environment_id: 'env_missing' })).rejects.toThrow('Unknown worker environment env_missing')
+})
