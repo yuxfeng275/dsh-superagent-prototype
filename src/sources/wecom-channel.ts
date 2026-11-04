@@ -1,31 +1,37 @@
 /** WeCom (企业微信) Channel: the app sends a text message to the member who asked, through the WeCom API. */
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 import type { OutboundMessage } from '../core/index.ts'
 import { HttpError, requestJson } from '../infra/http.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { ChannelLink, ChannelLinks, SendResult } from './kind.ts'
 
-/** The WeCom app's credentials, kept in a local JSON file rather than in the settings database. */
-export const WecomCredentialsSchema = z.object({
-  corpId: z.string().trim().min(1).max(64),
-  agentId: z.number().int().positive(),
-  secret: z.string().min(1).max(256),
-  token: z.string().regex(/^[A-Za-z0-9]{1,64}$/),
-  encodingAESKey: z.string().regex(/^[A-Za-z0-9]{43}$/),
-}).strict()
-export type WecomCredentials = z.infer<typeof WecomCredentialsSchema>
-
-/** Reads and validates the app credentials named by the Source's `credentials` setting. */
-export function loadWecomCredentials(path: string): WecomCredentials {
-  if (!path) throw new Error('The WeCom Source has no credentials file')
-  let value: unknown
-  try { value = JSON.parse(readFileSync(path, 'utf8')) }
-  catch (error) { throw new Error(`Cannot read the WeCom credentials file ${path}: ${error instanceof Error ? error.message : String(error)}`) }
-  const parsed = WecomCredentialsSchema.safeParse(value)
-  if (!parsed.success) throw new Error(`The WeCom credentials file ${path} is not valid: ${parsed.error.issues.map(issue => `${issue.path.join('.')} ${issue.message}`).join('; ')}`)
-  return parsed.data
+/** The credential fields the Source's settings form edits. */
+export interface WecomCredentialFields {
+  corpId: string
+  agentId: string
+  secret: string
+  token: string
+  encodingAESKey: string
+}
+/** The validated credentials the WeCom API calls take. */
+export interface WecomCredentials { corpId: string; agentId: number; secret: string; token: string; encodingAESKey: string }
+/**
+ * Validates the app credentials the operator entered, naming the missing fields so the panel can say what to fill.
+ * An empty field is allowed in the schema so the Source can be enabled before it is configured; using it is not.
+ */
+export function wecomCredentials(config: WecomCredentialFields): WecomCredentials {
+  const missing = [
+    ...config.corpId ? [] : ['CorpID'],
+    ...config.agentId ? [] : ['AgentId'],
+    ...config.secret ? [] : ['app Secret'],
+    ...config.token ? [] : ['callback Token'],
+    ...config.encodingAESKey ? [] : ['EncodingAESKey'],
+  ]
+  if (missing.length) throw new Error(`The WeCom Source is not configured yet; fill in ${missing.join(', ')}`)
+  const agentId = Number(config.agentId)
+  if (!Number.isInteger(agentId) || agentId <= 0) throw new Error('The WeCom AgentId must be a positive number')
+  return { corpId: config.corpId, agentId, secret: config.secret, token: config.token, encodingAESKey: config.encodingAESKey }
 }
 
 const TOKEN_URL = 'https://qyapi.weixin.qq.com/cgi-bin/gettoken'
@@ -58,10 +64,10 @@ export function forgetWecomTokens(): void { tokens.clear() }
  * Sends one message to the member and reports the WeCom message id for the effect ledger.
  * A rejected token is retried once with a fresh one; a member who no longer exists is `gone`.
  */
-export async function sendWecom(host: { commands: Commands; config: { credentials: string } }, message: OutboundMessage): Promise<SendResult> {
+export async function sendWecom(host: { commands: Commands; config: WecomCredentialFields }, message: OutboundMessage): Promise<SendResult> {
   const userId = message.channel.address.userId
   if (!userId) throw new Error('Missing WeCom reply target')
-  const credentials = loadWecomCredentials(host.config.credentials)
+  const credentials = wecomCredentials(host.config)
   let token = await accessToken(credentials)
   for (let attempt = 0; attempt < 2; attempt++) {
     const body = await requestJson(`${SEND_URL}?access_token=${encodeURIComponent(token)}`, { body: {

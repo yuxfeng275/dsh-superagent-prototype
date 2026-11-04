@@ -6,17 +6,21 @@ import { z } from 'zod'
 import { threadKey, type Trigger } from '../core/index.ts'
 import { health, sourceContext, type SourceContext } from './host.ts'
 import type { SourceKind } from './kind.ts'
-import { loadWecomCredentials, sendWecom, wecomLink } from './wecom-channel.ts'
+import { sendWecom, wecomCredentials, wecomLink } from './wecom-channel.ts'
 import { decryptWecom, wecomSignature, wecomSignatureMatches, xmlText } from './wecom-crypto.ts'
 import { SOURCE, wecomMessage, wecomTrigger } from './wecom-trigger.ts'
 
 export { SOURCE, wecomMessage, wecomTrigger, wecomTriggerId } from './wecom-trigger.ts'
-export { loadWecomCredentials, sendWecom, wecomLink, WecomCredentialsSchema } from './wecom-channel.ts'
+export { sendWecom, wecomCredentials, wecomLink } from './wecom-channel.ts'
 export { decryptWecom, encryptWecom, wecomSignature } from './wecom-crypto.ts'
 
 const WecomConfigSchema = z.object({
-  /** Absolute path of the app credentials JSON file; see docs/009 for its shape. */
-  credentials: z.string().trim().max(1024).refine(value => !value || value.startsWith('/'), 'The credentials file must be an absolute path').default(''),
+  // Credentials are edited in the panel; formats are checked here, and emptiness is allowed until the Source is used.
+  corpId: z.string().trim().max(64).regex(/^[A-Za-z0-9]*$/).default(''),
+  agentId: z.string().trim().max(16).regex(/^\d*$/).default(''),
+  secret: z.string().max(256).default(''),
+  token: z.string().trim().max(64).regex(/^[A-Za-z0-9]*$/).default(''),
+  encodingAESKey: z.string().trim().max(43).regex(/^[A-Za-z0-9]*$/).default(''),
   host: z.string().trim().min(1).default('127.0.0.1'),
   port: z.number().int().min(1).max(65535).default(8091),
   path: z.string().trim().regex(/^\/[A-Za-z0-9/_-]*$/).default('/wecom'),
@@ -30,14 +34,26 @@ export const wecomKind: SourceKind<WecomConfig> = {
     en: 'Receives messages members send to a WeCom self-built app and replies as the app. The callback URL must be reachable from the internet.' },
   schema: WecomConfigSchema,
   fields: [
-    { key: 'credentials', type: 'text', label: { zh: '凭据文件', en: 'Credentials file' },
-      hint: { zh: '应用的 corpId、agentId、secret、回调 Token 和 EncodingAESKey 的 JSON 文件绝对路径。文件不会存进设置数据库；换文件内容后下一次回调即生效。',
-        en: 'Absolute path of a JSON file holding the app\'s corpId, agentId, secret, callback Token and EncodingAESKey. It is not stored in the settings database; a changed file takes effect on the next callback.' } },
+    { key: 'corpId', type: 'text', pattern: '[A-Za-z0-9]*', label: { zh: '企业 ID（CorpID）', en: 'Corp ID' },
+      hint: { zh: '企业微信管理后台 → 我的企业 → 企业信息 → 企业ID，通常以 ww 开头。',
+        en: 'WeCom admin console → My Enterprise → Enterprise Info → Corp ID; it usually starts with ww.' } },
+    { key: 'agentId', type: 'text', pattern: '[0-9]*', label: { zh: '应用 AgentId', en: 'App AgentId' },
+      hint: { zh: '应用管理 → 自建 → 你的应用 → AgentId，例如 1000002。',
+        en: 'App Management → Self-built → your app → AgentId, for example 1000002.' } },
+    { key: 'secret', type: 'secret', label: { zh: '应用 Secret', en: 'App Secret' },
+      hint: { zh: '应用详情 → Secret；保存后只显示一次，可重置后再填。',
+        en: 'App detail → Secret; it is shown once and can be reset if lost.' } },
+    { key: 'token', type: 'secret', pattern: '[A-Za-z0-9]*', label: { zh: '回调 Token', en: 'Callback Token' },
+      hint: { zh: '应用详情 → 接收消息 → API 接收 里的 Token，由英文和数字组成。',
+        en: 'App detail → Receive Messages → API receive → Token; letters and digits.' } },
+    { key: 'encodingAESKey', type: 'secret', pattern: '[A-Za-z0-9]*', label: { zh: '回调 EncodingAESKey', en: 'Callback EncodingAESKey' },
+      hint: { zh: '同一处的 43 位 EncodingAESKey。', en: 'The 43-character EncodingAESKey from the same page.' } },
     { key: 'host', type: 'text', advanced: true, label: { zh: '监听地址', en: 'Listen address' }, hint: { zh: '默认只监听本机，由反向代理转发公网回调；直接暴露时改为 0.0.0.0。',
       en: 'Listens on the loopback interface by default, leaving a reverse proxy to forward the public callback; use 0.0.0.0 to expose it directly.' } },
     { key: 'port', type: 'number', advanced: true, min: 1, max: 65535, label: { zh: '监听端口', en: 'Listen port' } },
     { key: 'path', type: 'text', advanced: true, pattern: '/[A-Za-z0-9/_-]*', label: { zh: '回调路径', en: 'Callback path' },
-      hint: { zh: '企业微信管理后台“接收消息”里 URL 的路径部分。', en: 'The path part of the URL configured under "Receive Messages" in the WeCom admin console.' } },
+      hint: { zh: '把企业微信后台“接收消息”的 URL 设为 https://<你的域名><回调路径>，反向代理到本机该端口。',
+        en: 'Set the URL under "Receive Messages" in WeCom to https://<your host><callback path>, proxied to this port on the host.' } },
   ],
   health: ['wecom'],
   scope: () => ({ listened: true, observed: false, row: 'direct' }),
@@ -89,7 +105,7 @@ export async function answerWecom(ctx: Pick<SourceContext, 'receive' | 'threads'
   callback: WecomCallback): Promise<{ status: number; body: string }> {
   const url = new URL(callback.url, 'http://localhost')
   if (url.pathname !== config.path) return { status: 404, body: 'not found' }
-  const credentials = loadWecomCredentials(config.credentials)
+  const credentials = wecomCredentials(config)
   const signature = url.searchParams.get('msg_signature')
   const timestamp = url.searchParams.get('timestamp')
   const nonce = url.searchParams.get('nonce')
@@ -158,6 +174,14 @@ export async function watchWecom(ctx: SourceContext, signal: AbortSignal): Promi
         if (server) { server.close(); server = undefined; bound = '' }
         ctx.report('wecom', health('paused', 'sourceOff'))
       } else {
+        // Do not listen, and say exactly what is missing, until the panel's credential fields are filled in.
+        try { wecomCredentials(config) }
+        catch (error) {
+          if (server) { server.close(); server = undefined; bound = '' }
+          ctx.report('wecom', { state: 'paused', detail: String(error) })
+          await delay(5000, undefined, { signal }).catch(() => {})
+          continue
+        }
         const target = `${config.host}:${config.port}${config.path}`
         if (server && bound !== target) { server.close(); server = undefined; bound = '' }
         if (!server) {
@@ -169,12 +193,7 @@ export async function watchWecom(ctx: SourceContext, signal: AbortSignal): Promi
             continue
           }
         }
-        try {
-          loadWecomCredentials(config.credentials)
-          ctx.report('wecom', { state: 'ready', detail: `Listening on ${bound}`, at: new Date().toISOString() })
-        } catch (error) {
-          ctx.report('wecom', { state: 'paused', detail: String(error) })
-        }
+        ctx.report('wecom', { state: 'ready', detail: `Listening on ${bound}`, at: new Date().toISOString() })
       }
       await delay(5000, undefined, { signal }).catch(() => {})
     }

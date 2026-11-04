@@ -33,7 +33,8 @@ function fieldChanges(id: string, fields: readonly FieldSpec[], a: Record<string
       if (added.length) changes.push({ code: 'sourceRowsAdded', ...at, field: field.key, items: added })
       if (removed.length) changes.push({ code: 'sourceRowsRemoved', ...at, field: field.key, items: removed })
       if (changed.length) changes.push({ code: 'sourceRowsChanged', ...at, field: field.key, items: changed })
-    } else changes.push({ code: 'sourceField', ...at, field: field.key, from: from as string | number | boolean, to: to as string | number | boolean })
+    } else if (field.type === 'secret') changes.push({ code: 'sourceField', ...at, field: field.key, from: '••••', to: '••••' })
+    else changes.push({ code: 'sourceField', ...at, field: field.key, from: from as string | number | boolean, to: to as string | number | boolean })
   }
   return changes
 }

@@ -25,7 +25,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
-- For WeCom: a self-built app with message receiving enabled, its callback URL, Token and EncodingAESKey, and a public HTTPS address that forwards to the host
+- For WeCom: a self-built app with message receiving enabled, its Corp ID, AgentId, Secret, callback Token and EncodingAESKey, and a public HTTPS address that forwards to the host
 - For DingTalk: an app and a robot with Stream mode enabled
 
 ## Accounts
@@ -72,47 +72,26 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ### WeCom app (optional)
 
-Create a self-built app in the WeCom admin console, enable **Receive Messages**, and choose a URL, a Token and an EncodingAESKey. The URL must be public HTTPS:
+Create a self-built app in the WeCom admin console, enable **Receive Messages**, and choose a URL, a Token and an
+EncodingAESKey. The URL must be public HTTPS:
 
 ```
 https://<your host>/wecom  →  reverse proxy  →  http://127.0.0.1:8091/wecom
 ```
 
-Add the host's outbound IP to the app's trusted IP list, because sending messages through `cgi-bin/message/send` checks it. Then write the credentials file, readable only by the operator:
-
-```sh
-umask 077
-cat > ~/.config/dsh-superagent/wecom.json <<'JSON'
-{
-  "corpId": "ww…",
-  "agentId": 1000002,
-  "secret": "…",
-  "token": "…",
-  "encodingAESKey": "…"
-}
-JSON
-```
-
-Point the WeCom Source's **Credentials file** at that path, keep the default listen address behind the proxy, and enable the Source. The file is re-read on every callback, so rotating a secret needs no restart. Document 009 describes the callback and the limits.
+Add the host's outbound IP to the app's trusted IP list, because sending messages through `cgi-bin/message/send` checks
+it. Then enable the WeCom Source in the panel and fill in its fields: Corp ID, App AgentId, App Secret, callback Token
+and EncodingAESKey. Each field's hint names the admin-console page it comes from. The callback listener's address, port
+and path stay under **Advanced**, behind the reverse proxy by default. Saving a complete form starts the callback
+server; until then the Source reports paused and names the missing fields.
 
 ### DingTalk robot (optional)
 
-Create an app and a robot in the DingTalk developer console, enable Stream mode, and publish the robot. No public URL is needed. Write the credentials file:
+Create an app and a robot in the DingTalk developer console, enable Stream mode, and publish the robot. No public URL is
+needed. Then enable the DingTalk Source in the panel and fill in Client ID, Client Secret and RobotCode (usually the
+same as Client ID; leave it empty to use the Client ID). Saving a complete form reconnects the Stream.
 
-```sh
-umask 077
-cat > ~/.config/dsh-superagent/dingtalk.json <<'JSON'
-{
-  "clientId": "ding…",
-  "clientSecret": "…",
-  "robotCode": "ding…"
-}
-JSON
-```
-
-Point the DingTalk Source's **Credentials file** at that path and enable the Source. The robot must be enabled for the organisation and added to any group that should reach the agent. The file is re-read on the next reconnect.
-
-## Install
+## Install## Install
 
 Run this block once, on a machine that has no `superagent` profile yet:
 
@@ -263,7 +242,7 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source. WeCom and DingTalk are not part of setup: they read their credentials files at runtime and report a missing or unreadable file as a paused Source, so the rest of the application keeps running.
+Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source. WeCom and DingTalk are not part of setup: they read their credential fields at runtime and report missing fields as a paused Source, so the rest of the application keeps running.
 
 The process environment that setup writes:
 
