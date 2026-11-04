@@ -1176,7 +1176,7 @@ describe('the order of a Ticket\'s messages to one conversation', () => {
     vi.spyOn(runtime.sources, 'send').mockImplementation(async message => {
       if (refused.has(message.id)) throw new Error('internal error (2200)')
       sent.push(message.id)
-      return 'sent'
+      return { result: 'sent' as const }
     })
   })
   it('sends a Ticket\'s later result after its acknowledgement that failed once, and holds no other Ticket\'s message in the chat', async () => {
@@ -1209,7 +1209,7 @@ describe('the order of a Ticket\'s messages to one conversation', () => {
 
 it('keeps the receipt of a message withdrawn while it went out, so its id is not queued again', async () => {
   const { trigger } = await acceptedTicket()
-  vi.spyOn(runtime.sources, 'send').mockImplementation(async message => { runtime.outbox.withdraw(message.id); return 'sent' })
+  vi.spyOn(runtime.sources, 'send').mockImplementation(async message => { runtime.outbox.withdraw(message.id); return { result: 'sent' as const } })
   runtime.outbox.send({ id: 'raced', channel: trigger.channel!, text: 'Done', kind: 'reply' })
   await runtime.sendReplies()
   runtime.outbox.send({ id: 'raced', channel: trigger.channel!, text: 'Again', kind: 'reply' })

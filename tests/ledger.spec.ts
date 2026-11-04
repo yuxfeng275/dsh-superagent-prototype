@@ -19,8 +19,8 @@ it('keeps one record per idempotency key and moves it from intent to sent or fai
   ledger.intent('reply:m1', { instanceId: 'team-a', kind: 'reply', target: 'feishu:oc_1:om_1', leaseEpoch: 3 })
   expect(ledger.get('reply:m1')).toMatchObject({ idempotencyKey: 'reply:m1', instanceId: 'team-a', kind: 'reply',
     target: 'feishu:oc_1:om_1', leaseEpoch: 3, state: 'intent', detail: {} })
-  ledger.sent('reply:m1', { by: 'platform-idempotency' })
-  expect(ledger.get('reply:m1')).toMatchObject({ state: 'sent', detail: { by: 'platform-idempotency' } })
+  ledger.sent('reply:m1', { by: 'platform-idempotency' }, 'om_reply')
+  expect(ledger.get('reply:m1')).toMatchObject({ state: 'sent', externalId: 'om_reply', detail: { by: 'platform-idempotency' } })
   // A retry records its intent again but must not move a settled record back.
   ledger.intent('reply:m1', { instanceId: 'team-a', kind: 'reply', target: 'feishu:oc_1:om_1', leaseEpoch: 4 })
   expect(ledger.get('reply:m1')).toMatchObject({ state: 'sent', leaseEpoch: 3 })

@@ -37,7 +37,7 @@ it('keeps a message for a Source that is not installed waiting, and sends it onc
   const sent: OutboundMessage[] = []
   const probe: SourceKind<Record<string, never>> = { kind: 'probe', title: { zh: '探针', en: 'Probe' }, description: { zh: '', en: '' }, health: [],
     schema: z.object({}).strict(), fields: [],
-    channel: { send: async (_host, message) => { sent.push(message); return 'sent' }, link: () => ({ url: '', label: { zh: '探针', en: 'Probe' } }) } }
+    channel: { send: async (_host, message) => { sent.push(message); return { result: 'sent' } }, link: () => ({ url: '', label: { zh: '探针', en: 'Probe' } }) } }
   h.runtime.outbox.send({ id: 'waiting', channel: { source: 'probe', thread: 'probe:1', address: {} }, text: 'Done', kind: 'reply' })
   await h.runtime.sendReplies()
   expect([h.runtime.outbox.status('waiting'), h.runtime.health.reply?.state]).toEqual(['pending', 'ready'])
@@ -103,5 +103,25 @@ it('settles pending receipts the ledger already records as sent, before delivery
     expect(effects.cancel).toHaveBeenCalledWith('reply', message.id)
     // Once settled, the next start has nothing left to reconcile.
     expect(outbox.reconcile()).toBe(0)
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }) }
+})
+
+it('records the platform message id in the ledger when the channel reports one', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'outbox-external-id-'))
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  try {
+    const handlers = new Map<string, (payload: unknown, key: string) => Promise<void>>()
+    const effects = { handle: (kind: string, run: (payload: unknown, key: string) => Promise<void>) => { handlers.set(kind, run) },
+      enqueue: vi.fn(), cancel: vi.fn(), idle: vi.fn(async () => {}) }
+    const sources = { instance: () => ({ enabled: true }), channelAllowed: () => true,
+      send: vi.fn(async () => ({ result: 'sent' as const, externalId: '42' })) }
+    const ledger = new EffectLedger(store)
+    const outbox = new Outbox({ store, effects, sources, commands: {} as Commands, ledger,
+      instanceId: 'test-instance', epoch: () => 1, paused: () => false } as never)
+    const message: OutboundMessage = { id: 'external', channel: { source: 'github', thread: 'github:8', address: { number: '8' } }, text: 'Done', kind: 'notice' }
+    outbox.send(message)
+    await handlers.get('reply')!({}, message.id)
+    expect([store.receipts.get(message.id)?.status, ledger.get(replyEffect(message.id))]).toMatchObject(['sent',
+      { state: 'sent', externalId: '42' }])
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }) }
 })

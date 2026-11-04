@@ -75,7 +75,7 @@ describe('Channels', () => {
     for (const [code, message] of [[230011, 'The message is recalled'], [230001, 'message not found'], [231003,
       'The message is withdrawn']] as const) {
       run.mockRejectedValueOnce(lark(code, message))
-      expect(await send(value, feishu)).toBe('gone')
+      expect(await send(value, feishu)).toEqual({ result: 'gone' })
     }
     run.mockRejectedValueOnce(lark(232011, 'operator is not in the chat'))
     const hint = 'The Feishu bot is not a member of the chat. Add the bot in the chat settings, then retry.'
@@ -95,7 +95,7 @@ describe('Channels', () => {
     const gh = vi.spyOn(value, 'gh')
     for (const stderr of ['gh: This issue was deleted (HTTP 410)', 'gh: Unable to create comment because issue is locked. (HTTP 403)']) {
       gh.mockRejectedValueOnce(commandError({ stderr, code: 1 }))
-      expect(await send(value, reply)).toBe('gone')
+      expect(await send(value, reply)).toEqual({ result: 'gone' })
     }
     // GitHub also answers 404 for a private repository the agent lost access to, so 404 is retried rather than dropped.
     for (const stderr of ['gh: Not Found (HTTP 404)', 'gh: Server Error (HTTP 500)']) {
@@ -108,7 +108,7 @@ describe('Channels', () => {
     const pages = vi.spyOn(value, 'pages').mockResolvedValue([])
     const gh = vi.spyOn(value, 'gh')
       .mockRejectedValueOnce(commandError({ stderr: 'gh: Not Found (HTTP 404)', code: 1 })).mockResolvedValueOnce({})
-    expect(await send(value, { ...reply, channel: githubChannel(8, `https://github.com/${REPOSITORY}/pull/8#discussion_r7`) })).toBe('sent')
+    expect(await send(value, { ...reply, channel: githubChannel(8, `https://github.com/${REPOSITORY}/pull/8#discussion_r7`) })).toEqual({ result: 'sent' })
     expect((pages.mock.calls[0] as unknown[])[1]).toBe('issues/8/comments')
     const post = ['api', `repos/${REPOSITORY}/issues/8/comments`, '--method', 'POST', '-f', expect.stringContaining('Done')]
     expect(gh.mock.calls[1]![0]).toEqual(post)
