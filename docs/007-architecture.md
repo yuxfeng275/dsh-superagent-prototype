@@ -463,6 +463,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/event-log.spec.ts` | The event log: one row per Source event, its per-Thread sequence, acknowledgement, and the replay of an event a crash left unacknowledged |
 | `tests/leases.spec.ts` | Leases: one live holder, a monotonic epoch floor, renewal deadlines, the Runtime's instance lease and its takeover of a stale one |
 | `tests/ledger.spec.ts` | The effect ledger: one record per idempotency key, its intent kept on a retry, and its sent or failed outcome |
+| `tests/recovery.spec.ts` | A restart on the same state directory: a Source event delivered again keeps one Trigger and one Ticket, and a reply the platform accepted before the crash is settled from the ledger |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
